@@ -1,0 +1,52 @@
+{
+  "started_at": "2026-10-21T12:49:02.440159+00:00",
+  "finished_at": "2026-10-21T12:49:51.334172+00:00",
+  "ok": true,
+  "error": null,
+  "project_ids": [
+    "indra",
+    "issa"
+  ],
+  "steps": [
+    {
+      "name": "imd",
+      "detail": "Stored 731 daily rows (2024-01-01 -> 2025-12-31).",
+      "ok": true
+    },
+    {
+      "name": "history:indra",
+      "detail": "Stored 2160 historical hours.",
+      "ok": true
+    },
+    {
+      "name": "ensemble:indra",
+      "detail": "Bias-corrected ensemble stored.",
+      "ok": true
+    },
+    {
+      "name": "archive:indra",
+      "detail": "Archived issued_20261021T12Z_WS-INDRA_ensemble.json",
+      "ok": true
+    },
+    {
+      "name": "history:issa",
+      "detail": "Stored 2160 historical hours.",
+      "ok": true
+    },
+    {
+      "name": "ensemble:issa",
+      "detail": "Bias-corrected ensemble stored.",
+      "ok": true
+    },
+    {
+      "name": "archive:issa",
+      "detail": "Archived issued_20261021T12Z_WS-ISSA_ensemble.json",
+      "ok": true
+    },
+    {
+      "name": "verify",
+      "detail": "Saved 105 verification score rows.",
+      "ok": true
+    }
+  ]
+}

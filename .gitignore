@@ -10,12 +10,15 @@ venv/
 # Data (generated)
 data/*.db
 data/*.sqlite
+# Track the live hub DB so Streamlit Cloud + daily Actions stay in sync.
+!data/heimdall.db
 data/reference/
 data/raw/
 data/calibrated/
 data/forecast_archive/
 data/logs/
 data/hub_refresh_status.json
+!data/hub_refresh_status.json
 *.parquet
 !data/.gitkeep
 

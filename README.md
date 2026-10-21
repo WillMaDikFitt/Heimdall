@@ -55,6 +55,19 @@ python scripts/run_refresh_hub.py
 - `data/heimdall.db` — active database
 - `data/weather.db` — optional backup of the older weather-only DB
 
+## Streamlit Community Cloud
+
+The live app reads `data/heimdall.db`. That file is tracked in git so Cloud has the same data as this repo.
+
+A GitHub Action (`.github/workflows/daily_hub_refresh.yml`) runs every day at **02:00 IST**:
+1. Reseed simulated sensors
+2. Run full hub analysis (`run_refresh_hub.py`)
+3. Commit updated `data/heimdall.db` (Streamlit redeploys automatically)
+
+You can also trigger it manually: GitHub → Actions → **Daily hub refresh** → Run workflow.
+
+Clicking **Run analysis** inside Streamlit only updates that session’s temporary disk — prefer the daily Action (or run the script locally and push) for lasting updates.
+
 ## Notes
 
 - Until hardware is installed, `run_heimdall_simulate.py` writes realistic synthetic series.
