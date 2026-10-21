@@ -50,14 +50,101 @@ def using_remote_db() -> bool:
     return remote_credentials() is not None
 
 
+class _IterableCursor:
+    """Make libsql cursors behave like sqlite3 (iterable + fetch*)."""
+
+    def __init__(self, cursor: Any) -> None:
+        self._cursor = cursor
+        self._rows: list[Any] | None = None
+        self._index = 0
+
+    def _materialize(self) -> list[Any]:
+        if self._rows is None:
+            self._rows = list(self._cursor.fetchall())
+            self._index = 0
+        return self._rows
+
+    def __iter__(self):
+        return iter(self._materialize())
+
+    def fetchone(self) -> Any:
+        rows = self._materialize()
+        if self._index >= len(rows):
+            return None
+        row = rows[self._index]
+        self._index += 1
+        return row
+
+    def fetchall(self) -> list[Any]:
+        rows = self._materialize()
+        leftover = rows[self._index :]
+        self._index = len(rows)
+        return leftover
+
+    def fetchmany(self, size: int | None = None) -> list[Any]:
+        rows = self._materialize()
+        if size is None:
+            size = 1
+        chunk = rows[self._index : self._index + size]
+        self._index += len(chunk)
+        return chunk
+
+    @property
+    def description(self) -> Any:
+        return getattr(self._cursor, "description", None)
+
+    @property
+    def rowcount(self) -> Any:
+        return getattr(self._cursor, "rowcount", -1)
+
+    def close(self) -> None:
+        close = getattr(self._cursor, "close", None)
+        if callable(close):
+            close()
+
+
+class _CompatConnection:
+    """Thin wrapper so remote libsql matches sqlite3 connection habits."""
+
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+
+    def execute(self, sql: str, parameters: Any = ()) -> _IterableCursor:
+        if parameters in ((), [], None):
+            cursor = self._conn.execute(sql)
+        else:
+            cursor = self._conn.execute(sql, parameters)
+        return _IterableCursor(cursor)
+
+    def executemany(self, sql: str, seq_of_parameters: Any) -> _IterableCursor:
+        cursor = self._conn.executemany(sql, seq_of_parameters)
+        return _IterableCursor(cursor)
+
+    def executescript(self, script: str) -> Any:
+        return self._conn.executescript(script)
+
+    def commit(self) -> None:
+        self._conn.commit()
+
+    def rollback(self) -> None:
+        rollback = getattr(self._conn, "rollback", None)
+        if callable(rollback):
+            rollback()
+
+    def close(self) -> None:
+        self._conn.close()
+
+    def cursor(self) -> Any:
+        return self._conn.cursor()
+
+
 def _open_connection(cfg: dict | None = None) -> Any:
     creds = remote_credentials()
     if creds is not None:
         import libsql
 
         url, token = creds
-        conn = libsql.connect(database=url, auth_token=token)
-        return conn
+        return _CompatConnection(libsql.connect(database=url, auth_token=token))
 
     conn = sqlite3.connect(db_path(cfg))
     conn.row_factory = sqlite3.Row
