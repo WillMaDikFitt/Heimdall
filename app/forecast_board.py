@@ -312,19 +312,19 @@ def render_forecast_board_html(payload: dict[str, Any]) -> str:
       font-family: var(--font);
     }}
     .summary {{
-      display: grid; grid-template-columns: 1.4fr 1fr; gap: 14px;
-      padding: 16px 18px; border-radius: 18px; margin-bottom: 12px;
+      display: grid; grid-template-columns: 1.45fr 1fr; gap: 12px;
+      padding: 14px 16px; border-radius: 16px; margin-bottom: 10px;
       background:
         radial-gradient(320px 160px at 92% 12%, color-mix(in srgb, var(--accent) 28%, transparent), transparent 60%),
         color-mix(in srgb, var(--panel) 94%, transparent);
       border: 1px solid var(--border);
     }}
     .summary .eyebrow {{
-      color: var(--muted); font-size: .68rem; font-weight: 700;
-      letter-spacing: .08em; text-transform: uppercase; margin: 0 0 6px;
+      color: var(--muted); font-size: .64rem; font-weight: 700;
+      letter-spacing: .08em; text-transform: uppercase; margin: 0 0 4px;
     }}
     .summary h2 {{
-      margin: 0 0 8px; font-size: 1.28rem; font-weight: 700;
+      margin: 0 0 6px; font-size: 1.15rem; font-weight: 700;
       letter-spacing: -.02em; color: #fff; line-height: 1.25;
     }}
     .summary .tag {{
@@ -359,36 +359,36 @@ def render_forecast_board_html(payload: dict[str, Any]) -> str:
     }}
     .kpis {{
       display: grid; grid-template-columns: repeat(5, minmax(0, 1fr));
-      gap: 10px; margin-bottom: 12px;
+      gap: 8px; margin-bottom: 10px;
     }}
     .kpi {{
-      padding: 14px 14px 12px; border-radius: 16px;
+      padding: 12px 12px 10px; border-radius: 14px;
       background: color-mix(in srgb, var(--chip) 88%, transparent);
       border: 1px solid var(--border);
-      min-height: 78px;
+      min-height: 72px;
     }}
-    .kpi .k {{ color: var(--muted); font-size: .72rem; font-weight: 600; margin: 0 0 6px; }}
-    .kpi .v {{ color: #fff; font-size: 1.2rem; font-weight: 700; margin: 0; letter-spacing: -.02em; }}
-    .kpi .v .u {{ color: var(--muted); font-size: .75rem; font-weight: 500; margin-left: 3px; }}
-    .kpi .s {{ color: var(--faint); font-size: .68rem; margin-top: 4px; line-height: 1.3; }}
+    .kpi .k {{ color: var(--muted); font-size: .68rem; font-weight: 600; margin: 0 0 4px; }}
+    .kpi .v {{ color: #fff; font-size: 1.12rem; font-weight: 700; margin: 0; letter-spacing: -.02em; }}
+    .kpi .v .u {{ color: var(--muted); font-size: .72rem; font-weight: 500; margin-left: 3px; }}
+    .kpi .s {{ color: var(--faint); font-size: .64rem; margin-top: 3px; line-height: 1.3; }}
     .grid {{
-      display: grid; grid-template-columns: 1.15fr 1fr; gap: 12px; margin-bottom: 12px;
+      display: grid; grid-template-columns: 1.15fr 1fr; gap: 10px; margin-bottom: 10px;
     }}
     .grid.wide {{ grid-template-columns: 1fr; }}
     .card {{
-      padding: 14px 16px 10px; border-radius: 18px;
+      padding: 12px 14px 8px; border-radius: 16px;
       background: color-mix(in srgb, var(--panel) 92%, transparent);
       border: 1px solid var(--border);
-      min-height: 280px;
+      min-height: 250px;
     }}
     .card h3 {{
-      margin: 0 0 2px; font-size: .92rem; font-weight: 700; color: #fff;
+      margin: 0 0 2px; font-size: .86rem; font-weight: 700; color: #fff;
     }}
     .card p.note {{
-      margin: 0 0 10px; color: var(--muted); font-size: .72rem; line-height: 1.35;
+      margin: 0 0 8px; color: var(--muted); font-size: .68rem; line-height: 1.35;
     }}
-    .chart-wrap {{ position: relative; height: 220px; }}
-    .chart-wrap.tall {{ height: 260px; }}
+    .chart-wrap {{ position: relative; height: 200px; }}
+    .chart-wrap.tall {{ height: 230px; }}
     .empty {{
       color: var(--muted); font-size: .8rem; padding: 24px 8px; text-align: center;
     }}
@@ -404,31 +404,31 @@ def render_forecast_board_html(payload: dict[str, Any]) -> str:
   <div class="grid">
     <div class="card">
       <h3>Daily rain &amp; wet hours</h3>
-      <p class="note">Bars = expected rain (mm). Line = hours with measurable rain.</p>
+      <p class="note">Bars = rain (mm) · line = wet hours</p>
       <div class="chart-wrap tall"><canvas id="rainDaily"></canvas></div>
     </div>
     <div class="card">
       <h3>Temperature range</h3>
-      <p class="note">Daily high and low band for the next week.</p>
+      <p class="note">Daily high / low for the week</p>
       <div class="chart-wrap tall"><canvas id="tempDaily"></canvas></div>
     </div>
   </div>
   <div class="grid">
     <div class="card">
-      <h3>Hourly rain timeline</h3>
-      <p class="note">Next seven days, hour by hour.</p>
+      <h3>Hourly rain</h3>
+      <p class="note">Next 7 days, hour by hour</p>
       <div class="chart-wrap"><canvas id="rainHourly"></canvas></div>
     </div>
     <div class="card">
       <h3>Wind &amp; humidity</h3>
-      <p class="note">Hourly wind speed and relative humidity.</p>
+      <p class="note">Hourly wind and RH</p>
       <div class="chart-wrap"><canvas id="windHum"></canvas></div>
     </div>
   </div>
   <div class="grid wide" id="memberCard" style="display:none">
     <div class="card">
       <h3>Model rain agreement</h3>
-      <p class="note">Daily rain totals from each weather service — closer bars mean stronger agreement.</p>
+      <p class="note">Closer bars = stronger agreement across services</p>
       <div class="chart-wrap tall"><canvas id="memberRain"></canvas></div>
     </div>
   </div>
@@ -467,11 +467,11 @@ def render_forecast_board_html(payload: dict[str, Any]) -> str:
     }}
     const K = DATA.kpis;
     document.getElementById("kpis").innerHTML = [
-      kpi("7-day rain", K.rain_total ?? "—", "mm", "Total expected"),
-      kpi("Wet hours", K.wet_hours ?? "—", "", "Hours with rain ≥ 0.1 mm"),
-      kpi("Warmest", K.temp_high ?? "—", "°C", "Highest daily max"),
-      kpi("Coolest", K.temp_low ?? "—", "°C", "Lowest daily min"),
-      kpi("Wettest day", K.wettest || "—", "", `Peak wind ${{K.wind_peak ?? "—"}} m/s`),
+      kpi("7-day rain", K.rain_total ?? "—", "mm", "Week total"),
+      kpi("Wet hours", K.wet_hours ?? "—", "", "≥ 0.1 mm"),
+      kpi("Warmest", K.temp_high ?? "—", "°C", "Daily max"),
+      kpi("Coolest", K.temp_low ?? "—", "°C", "Daily min"),
+      kpi("Wettest day", K.wettest || "—", "", `Wind peak ${{K.wind_peak ?? "—"}} m/s`),
     ].join("");
 
     const tip = {{

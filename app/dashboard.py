@@ -22,7 +22,11 @@ from src.config import load_config, save_hub_settings, save_station_location
 from src.hub import product_name, product_tagline, projects as hub_projects, resolve_project_id
 from src.hub_refresh import load_refresh_status, run_hub_refresh
 from src.telemetry.domains import DOMAIN_CHANNELS, domain_labels, project_domains
-from src.telemetry.store import load_telemetry, load_telemetry_latest
+from src.telemetry.store import (
+    load_telemetry,
+    load_telemetry_freshness,
+    load_telemetry_latest,
+)
 from src.ingestion.store import (
     load_calibrated,
     load_ensemble_forecast,
@@ -284,7 +288,9 @@ def _friendly_forecast_source(source: str) -> str:
     if source.startswith("ensemble:"):
         members = source.removeprefix("ensemble:").split("+")
         names = [SOURCE_DETAILS.get(member, (member, "", ""))[0] for member in members]
-        return "Combined forecast from " + ", ".join(names)
+        if len(names) <= 2:
+            return "Ensemble · " + " + ".join(names)
+        return f"Ensemble · {len(names)} models"
     return source.replace("·", "—")
 
 
@@ -295,6 +301,148 @@ def _range_foot(frame: pd.DataFrame, channel: str, digits: int = 1) -> str:
     if values.empty:
         return ""
     return f"24h range {values.min():.{digits}f} – {values.max():.{digits}f}"
+
+
+def _as_utc_ts(value: object) -> pd.Timestamp | None:
+    if value is None or (isinstance(value, float) and pd.isna(value)):
+        return None
+    try:
+        ts = pd.Timestamp(value)
+    except Exception:
+        return None
+    if pd.isna(ts):
+        return None
+    if ts.tzinfo is None:
+        return ts.tz_localize("UTC")
+    return ts.tz_convert("UTC")
+
+
+def _freshness_age(
+    ts: pd.Timestamp | None,
+    *,
+    now: pd.Timestamp | None = None,
+) -> tuple[float | None, str]:
+    """Return (age_minutes, severity). Severity: ok / warn / danger / idle."""
+    if ts is None:
+        return None, "idle"
+    current = now or pd.Timestamp.now(tz="UTC")
+    age_min = max(0.0, (current - ts).total_seconds() / 60.0)
+    if age_min <= 60:
+        return age_min, "ok"
+    if age_min <= 360:
+        return age_min, "warn"
+    return age_min, "danger"
+
+
+def _format_updated_relative(age_min: float | None) -> str:
+    if age_min is None:
+        return "No data"
+    if age_min < 1:
+        return "Just now"
+    if age_min < 60:
+        return f"{age_min:.0f} min ago"
+    age_h = age_min / 60.0
+    if age_h < 36:
+        return f"{age_h:.1f} h ago"
+    return f"{age_h / 24.0:.1f} d ago"
+
+
+def _format_updated_absolute(ts: pd.Timestamp | None, tz: str) -> str:
+    if ts is None:
+        return ""
+    local = ts.tz_convert(tz)
+    return local.strftime("%d %b · %H:%M IST")
+
+
+def _dataset_freshness_rows(
+    *,
+    project: dict,
+    cfg: dict,
+    weather_readings: pd.DataFrame,
+    tz: str,
+    forecast: ForecastBundle | None = None,
+    include_analysis: bool = False,
+) -> list[dict[str, str]]:
+    """Build last-updated rows for each project dataset."""
+    names = domain_labels()
+    domains = project_domains(project) or ["weather"]
+    station_id = str(project["station"]["id"])
+    tel_fresh = load_telemetry_freshness(station_id=station_id, cfg=cfg)
+    now = pd.Timestamp.now(tz="UTC")
+    rows: list[dict[str, str]] = []
+
+    for domain in domains:
+        if domain == "weather":
+            ts = None
+            if not weather_readings.empty and "timestamp" in weather_readings.columns:
+                ts = _as_utc_ts(pd.to_datetime(weather_readings["timestamp"], utc=True).max())
+        else:
+            ts = tel_fresh.get(domain)
+            ts = _as_utc_ts(ts) if ts is not None else None
+        age_min, severity = _freshness_age(ts, now=now)
+        rows.append(
+            {
+                "name": names.get(domain, domain),
+                "relative": _format_updated_relative(age_min),
+                "absolute": _format_updated_absolute(ts, tz),
+                "severity": severity,
+            }
+        )
+
+    if forecast is not None:
+        ts = _as_utc_ts(forecast.fetched_at)
+        age_min, severity = _freshness_age(ts, now=now)
+        rows.append(
+            {
+                "name": "Forecast",
+                "relative": _format_updated_relative(age_min),
+                "absolute": _format_updated_absolute(ts, tz),
+                "severity": severity,
+            }
+        )
+
+    if include_analysis:
+        status = load_refresh_status()
+        ts = _as_utc_ts(status.get("finished_at"))
+        age_min, severity = _freshness_age(ts, now=now)
+        if status.get("finished_at") and not status.get("ok"):
+            severity = "danger"
+        rows.append(
+            {
+                "name": "Analysis",
+                "relative": _format_updated_relative(age_min),
+                "absolute": _format_updated_absolute(ts, tz),
+                "severity": severity,
+            }
+        )
+    return rows
+
+
+def _render_dataset_freshness(rows: list[dict[str, str]], *, title: str = "Last updated") -> None:
+    if not rows:
+        return
+    cards = []
+    for row in rows:
+        abs_html = (
+            f'<span class="df-abs">{html.escape(row["absolute"])}</span>'
+            if row.get("absolute")
+            else ""
+        )
+        cards.append(
+            '<div class="df-item">'
+            f'<span class="df-name">{html.escape(row["name"])}</span>'
+            f'<span class="df-when df-{html.escape(row["severity"])}">'
+            f'{html.escape(row["relative"])}</span>'
+            f"{abs_html}"
+            "</div>"
+        )
+    st.markdown(
+        f'<div class="dataset-freshness">'
+        f'<div class="df-title">{html.escape(title)}</div>'
+        f'<div class="df-row">{"".join(cards)}</div>'
+        "</div>",
+        unsafe_allow_html=True,
+    )
 
 
 def _page_intro(title: str, body: str = "") -> None:
@@ -370,7 +518,7 @@ def _active_theme_id(cfg: dict) -> str:
 
 def _render_settings_page(cfg: dict, projects: dict[str, dict]) -> None:
     """Hub display and forecast settings saved into config.yaml."""
-    _page_intro("Settings", "Hub display and outlook options.")
+    _page_intro("Settings", "Theme, display, and outlook. Advanced options stay collapsed.")
     prefs = _ui_prefs(cfg)
     skill = _skill_prefs(cfg)
     forecast = cfg.get("forecast") or {}
@@ -433,7 +581,7 @@ def _render_settings_page(cfg: dict, projects: dict[str, dict]) -> None:
             f"Saved theme is still {theme.THEMES[prefs['color_theme']]['label']} until you press Save."
         )
 
-    st.markdown(theme.section("Display", "Charts and tables on Data."), unsafe_allow_html=True)
+    st.markdown(theme.section("Display", "History window and chart defaults."), unsafe_allow_html=True)
     c1, c2 = st.columns(2, gap="medium")
     with c1:
         data_window = st.selectbox(
@@ -520,67 +668,8 @@ def _render_settings_page(cfg: dict, projects: dict[str, dict]) -> None:
         format_func=lambda key: member_labels.get(key, key),
         key="set_ensemble_members",
     )
-
-    st.markdown(
-        theme.section("Calibration", "How sensor readings are cleaned before fitting."),
-        unsafe_allow_html=True,
-    )
-    cal1, cal2, cal3 = st.columns(3, gap="medium")
-    with cal1:
-        resample_minutes = st.number_input(
-            "Resample minutes",
-            min_value=5,
-            max_value=180,
-            value=int(calibration.get("resample_minutes", 60)),
-            step=5,
-            key="set_resample_minutes",
-        )
-    with cal2:
-        iqr_multiplier = st.number_input(
-            "IQR spike filter",
-            min_value=1.0,
-            max_value=5.0,
-            value=float(calibration.get("iqr_multiplier", 1.5)),
-            step=0.1,
-            key="set_iqr_multiplier",
-        )
-    with cal3:
-        holdout_fraction = st.number_input(
-            "Holdout fraction",
-            min_value=0.1,
-            max_value=0.5,
-            value=float(calibration.get("holdout_fraction", 0.3)),
-            step=0.05,
-            key="set_holdout_fraction",
-        )
-
-    st.markdown(
-        theme.section("Drift alerts", "Warn when a sensor bias exceeds these limits."),
-        unsafe_allow_html=True,
-    )
-    drift_cols = st.columns(len(drift_channels), gap="small")
-    drift_thresholds: dict[str, float] = {}
-    for col, channel in zip(drift_cols, drift_channels):
-        meta = channels.get(channel) or {}
-        with col:
-            drift_thresholds[channel] = float(
-                st.number_input(
-                    str(meta.get("label", channel)),
-                    min_value=0.1,
-                    max_value=100.0,
-                    value=float(meta.get("drift_alert_threshold", 2.0)),
-                    step=0.1,
-                    key=f"set_drift_{channel}",
-                    help=f"Unit: {meta.get('unit', '')}",
-                )
-            )
-
-    st.markdown(
-        theme.section("Skill / confidence", "Bands used on Progress and Overview confidence."),
-        unsafe_allow_html=True,
-    )
-    v1, v2, v3 = st.columns(3, gap="medium")
-    with v1:
+    o1, o2 = st.columns(2, gap="medium")
+    with o1:
         verify_min_age = st.number_input(
             "Wait before scoring (hours)",
             min_value=12,
@@ -588,25 +677,9 @@ def _render_settings_page(cfg: dict, projects: dict[str, dict]) -> None:
             value=int(forecast.get("verify_min_age_hours", 48)),
             step=6,
             key="set_verify_age",
-            help="An outlook needs this much age before Progress can score it.",
+            help="How old an outlook must be before Progress can score it.",
         )
-        day_mae_good = st.number_input(
-            "Day MAE good (mm)",
-            min_value=0.5,
-            max_value=20.0,
-            value=skill["day_mae_good"],
-            step=0.5,
-            key="set_day_mae_good",
-        )
-        confidence_mae_good = st.number_input(
-            "Confidence MAE good (°C)",
-            min_value=0.5,
-            max_value=10.0,
-            value=skill["confidence_mae_good"],
-            step=0.1,
-            key="set_conf_mae_good",
-        )
-    with v2:
+    with o2:
         historical_days = st.number_input(
             "History days to keep",
             min_value=30,
@@ -615,56 +688,124 @@ def _render_settings_page(cfg: dict, projects: dict[str, dict]) -> None:
             step=10,
             key="set_historical_days",
         )
-        day_mae_fair = st.number_input(
-            "Day MAE fair (mm)",
-            min_value=1.0,
-            max_value=30.0,
-            value=skill["day_mae_fair"],
-            step=0.5,
-            key="set_day_mae_fair",
-        )
-        confidence_mae_fair = st.number_input(
-            "Confidence MAE fair (°C)",
-            min_value=0.5,
-            max_value=15.0,
-            value=skill["confidence_mae_fair"],
-            step=0.1,
-            key="set_conf_mae_fair",
-        )
-    with v3:
-        csi_target = st.number_input(
-            "CSI timing target",
-            min_value=0.1,
-            max_value=1.0,
-            value=skill["csi_target"],
-            step=0.05,
-            key="set_csi_target",
-        )
-        spread_steady = st.number_input(
-            "Spread steady (°C)",
-            min_value=0.2,
-            max_value=5.0,
-            value=skill["spread_steady"],
-            step=0.1,
-            key="set_spread_steady",
-        )
-        spread_mixed = st.number_input(
-            "Spread mixed (°C)",
-            min_value=0.5,
-            max_value=10.0,
-            value=skill["spread_mixed"],
-            step=0.1,
-            key="set_spread_mixed",
-        )
+
+    with st.expander("Advanced · calibration, drift limits, skill bands", expanded=False):
+        st.caption("Leave defaults unless you are tuning the pipeline.")
+        st.markdown("**Calibration**")
+        cal1, cal2, cal3 = st.columns(3, gap="medium")
+        with cal1:
+            resample_minutes = st.number_input(
+                "Resample minutes",
+                min_value=5,
+                max_value=180,
+                value=int(calibration.get("resample_minutes", 60)),
+                step=5,
+                key="set_resample_minutes",
+            )
+        with cal2:
+            iqr_multiplier = st.number_input(
+                "IQR spike filter",
+                min_value=1.0,
+                max_value=5.0,
+                value=float(calibration.get("iqr_multiplier", 1.5)),
+                step=0.1,
+                key="set_iqr_multiplier",
+            )
+        with cal3:
+            holdout_fraction = st.number_input(
+                "Holdout fraction",
+                min_value=0.1,
+                max_value=0.5,
+                value=float(calibration.get("holdout_fraction", 0.3)),
+                step=0.05,
+                key="set_holdout_fraction",
+            )
+
+        st.markdown("**Drift alerts**")
+        drift_cols = st.columns(len(drift_channels), gap="small")
+        drift_thresholds: dict[str, float] = {}
+        for col, channel in zip(drift_cols, drift_channels):
+            meta = channels.get(channel) or {}
+            with col:
+                drift_thresholds[channel] = float(
+                    st.number_input(
+                        str(meta.get("label", channel)),
+                        min_value=0.1,
+                        max_value=100.0,
+                        value=float(meta.get("drift_alert_threshold", 2.0)),
+                        step=0.1,
+                        key=f"set_drift_{channel}",
+                        help=f"Unit: {meta.get('unit', '')}",
+                    )
+                )
+
+        st.markdown("**Skill / confidence bands**")
+        v1, v2, v3 = st.columns(3, gap="medium")
+        with v1:
+            day_mae_good = st.number_input(
+                "Day MAE good (mm)",
+                min_value=0.5,
+                max_value=20.0,
+                value=skill["day_mae_good"],
+                step=0.5,
+                key="set_day_mae_good",
+            )
+            confidence_mae_good = st.number_input(
+                "Confidence MAE good (°C)",
+                min_value=0.5,
+                max_value=10.0,
+                value=skill["confidence_mae_good"],
+                step=0.1,
+                key="set_conf_mae_good",
+            )
+        with v2:
+            day_mae_fair = st.number_input(
+                "Day MAE fair (mm)",
+                min_value=1.0,
+                max_value=30.0,
+                value=skill["day_mae_fair"],
+                step=0.5,
+                key="set_day_mae_fair",
+            )
+            confidence_mae_fair = st.number_input(
+                "Confidence MAE fair (°C)",
+                min_value=0.5,
+                max_value=15.0,
+                value=skill["confidence_mae_fair"],
+                step=0.1,
+                key="set_conf_mae_fair",
+            )
+        with v3:
+            csi_target = st.number_input(
+                "CSI timing target",
+                min_value=0.1,
+                max_value=1.0,
+                value=skill["csi_target"],
+                step=0.05,
+                key="set_csi_target",
+            )
+            spread_steady = st.number_input(
+                "Spread steady (°C)",
+                min_value=0.2,
+                max_value=5.0,
+                value=skill["spread_steady"],
+                step=0.1,
+                key="set_spread_steady",
+            )
+            spread_mixed = st.number_input(
+                "Spread mixed (°C)",
+                min_value=0.5,
+                max_value=10.0,
+                value=skill["spread_mixed"],
+                step=0.1,
+                key="set_spread_mixed",
+            )
 
     left, right = st.columns((1, 3), gap="medium")
     with left:
         save = st.button("Save settings", type="primary", width="stretch", key="save_hub_settings")
     with right:
-        st.caption(
-            "Saved to config.yaml. After model or day changes, press Run analysis "
-            "(not only Reload UI)."
-        )
+        st.caption("Save, then press Run analysis if you changed forecast models or days ahead.")
 
     st.html(
         theme.paint_streamlit_controls(theme.theme_tokens(color_theme)["accent"]),
@@ -1104,7 +1245,8 @@ def _overview_alert_items(
     confidence_label: str,
     confidence_note: str,
 ) -> list[tuple[str, str]]:
-    """Return (severity, message) pairs for the Overview alerts strip."""
+    """Return prioritized (severity, message) pairs for a short Overview strip."""
+    del confidence_note  # shown in the confidence gauge instead
     items: list[tuple[str, str]] = []
     kind = str(project.get("kind", "dam"))
     now = pd.Timestamp.now(tz="UTC")
@@ -1131,25 +1273,25 @@ def _overview_alert_items(
             )
             watch, _, level = _dam_rain_watch(rain_24, rain_72, recent)
         severity = "ok" if level == "low" else ("danger" if level == "high" else "warn")
-        items.append((severity, f"Rain watch · {watch}"))
+        items.append((severity, f"Rain · {watch}"))
 
-    for alert in _alerts(cfg, coeffs):
-        items.append(("warn", alert))
+    # Only first drift alert — keep the strip scannable
+    drift = _alerts(cfg, coeffs)
+    if drift:
+        short = drift[0]
+        if len(short) > 88:
+            short = short[:85] + "…"
+        items.append(("warn", short))
+        if len(drift) > 1:
+            items.append(("warn", f"+{len(drift) - 1} more sensor drift alert(s)"))
 
     if not readings.empty and "timestamp" in readings.columns:
         last_sensor = pd.to_datetime(readings["timestamp"], utc=True).max()
         age_min = (now - last_sensor).total_seconds() / 60.0
         if age_min > stale_limit:
-            items.append(
-                ("warn", f"Sensor data is {age_min / 60.0:.1f} h old (limit ~{stale_limit:.0f} min).")
-            )
-    elif not reference.empty and "timestamp" in reference.columns:
-        last_ref = pd.to_datetime(reference["timestamp"], utc=True).max()
-        age_h = (now - last_ref).total_seconds() / 3600.0
-        if age_h > 6:
-            items.append(("warn", f"Area weather history is {age_h:.0f} h old."))
-    else:
-        items.append(("warn", "No sensor or area history loaded yet."))
+            items.append(("warn", f"Sensors stale · {age_min / 60.0:.1f} h old"))
+    elif reference.empty:
+        items.append(("warn", "No sensor history loaded yet"))
 
     status = load_refresh_status()
     finished = status.get("finished_at")
@@ -1160,23 +1302,20 @@ def _overview_alert_items(
                 when = when.tz_localize("UTC")
             age_h = (now - when).total_seconds() / 3600.0
             if not status.get("ok"):
-                items.append(("danger", f"Last analysis failed ({age_h:.0f} h ago)."))
+                items.append(("danger", "Last analysis failed"))
             elif age_h > 36:
-                items.append(("warn", f"Last analysis is {age_h:.0f} h old — consider Run analysis."))
-            else:
-                items.append(("ok", _format_analysis_stamp(status)))
+                items.append(("warn", f"Analysis {age_h:.0f} h old · Run analysis"))
         except Exception:
-            items.append(("ok", _format_analysis_stamp(status)))
+            pass
     else:
-        items.append(("warn", "No analysis run yet — use Run analysis in the sidebar."))
+        items.append(("warn", "No analysis yet · Run analysis"))
 
-    items.append(("ok", f"Confidence · {confidence_label}: {confidence_note}"))
-    members = list((cfg.get("forecast") or {}).get("ensemble_members") or [])
-    if members:
-        labels = {"ecmwf": "ECMWF", "gfs": "GFS", "met_norway": "MET Norway"}
-        chip = ", ".join(labels.get(m, m) for m in members)
-        items.append(("ok", f"Models · {chip}"))
-    return items
+    rank = {"danger": 0, "warn": 1, "ok": 2}
+    items.sort(key=lambda pair: rank.get(pair[0], 9))
+    # Prefer action items; drop routine "ok" chips unless that is all we have
+    action = [item for item in items if item[0] != "ok"]
+    chosen = action[:4] if action else items[:2]
+    return chosen
 
 
 def _render_overview_alerts(items: list[tuple[str, str]]) -> None:
@@ -1247,9 +1386,21 @@ def _forecast_overview(
             confidence_note=confidence_note,
         )
     )
+    if project:
+        _render_dataset_freshness(
+            _dataset_freshness_rows(
+                project=project,
+                cfg=cfg,
+                weather_readings=station_readings,
+                tz=tz,
+                forecast=bundle,
+                include_analysis=True,
+            )
+        )
     recent_72h = _recent_rain(station_readings, 72)
     humidity_now = current.get("humidity_pct")
     kind = str((project or {}).get("kind", "dam"))
+    project_label = str((project or {}).get("label", "site"))
     station_is_live = (
         not station_readings.empty
         and "source" in station_readings.columns
@@ -1263,35 +1414,26 @@ def _forecast_overview(
             watch_label, 40.0
         )
         gauge_title = "Rain outlook"
-        gauge_sub = "For irrigation and crop care"
-        humidity_foot = "Plantation microclimate"
-        week_note = "Rain total and how long the rain lasts at the plantation"
-        if station_is_live:
-            source_note = (
-                "Rain outlook is area weather at this pin, checked against the solar station when available."
-            )
-        else:
-            source_note = (
-                "Rain millimetres are area estimates at this pin, not a plantation rain gauge. "
-                "They will switch to the solar station when it is plugged in."
-            )
+        gauge_sub = "Irrigation planning"
+        humidity_foot = "On site"
+        week_note = f"Daily rain and wet hours at {project_label}"
+        source_note = (
+            "Live station at this pin."
+            if station_is_live
+            else "Area estimate until the field station is online."
+        )
     else:
         watch_label, watch_action, _watch_class = _dam_rain_watch(rain_total, rain_72h, recent_72h)
         watch_pct = {"Routine": 34.0, "Raised": 68.0, "High": 92.0}.get(watch_label, 34.0)
         gauge_title = "Rainfall watch"
-        gauge_sub = "For reservoir monitoring only"
-        humidity_foot = "Now at the dam area"
-        week_note = "Rain total and how long the rain lasts at INDRA"
-        if station_is_live:
-            source_note = (
-                "Rain outlook is area weather at this pin. "
-                "Recent rain uses the station. Rainfall alone cannot decide gate operations."
-            )
-        else:
-            source_note = (
-                "Rain millimetres are area estimates at this pin, not a dam rain gauge. "
-                "Rainfall alone cannot decide gate operations."
-            )
+        gauge_sub = "Monitoring only — not gate control"
+        humidity_foot = "On site"
+        week_note = f"Daily rain and wet hours at {project_label}"
+        source_note = (
+            "Live station · rain alone cannot decide operations."
+            if station_is_live
+            else "Area estimate · rain alone cannot decide operations."
+        )
     peak_hourly_rain = float(
         pd.to_numeric(future.iloc[:72]["rainfall_mm"], errors="coerce").fillna(0).max()
     )
@@ -1441,31 +1583,10 @@ def _forecast_overview(
 
     fetched_local = pd.Timestamp(bundle.fetched_at).tz_convert(tz)
     source_name = _friendly_forecast_source(str(bundle.source))
-    st.markdown(
-        f'<div class="source-line">'
-        f"<strong>Source:</strong> {html.escape(source_name)} · "
-        f"updated {fetched_local.strftime('%d %b %Y, %H:%M IST')}. "
-        f"{html.escape(source_note)}</div>",
-        unsafe_allow_html=True,
+    st.caption(
+        f"{source_name} · {fetched_local.strftime('%d %b %H:%M IST')} · {source_note} "
+        "Full week on Forecast."
     )
-
-    if kind == "plantation" and not station_is_live:
-        st.markdown(
-            theme.section(
-                "Sensors that can still be added",
-                "Temperature, humidity, and pressure are already in the kit plan.",
-            ),
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            '<div class="kit-grid kit-grid-four">'
-            + theme.tile("Rain gauge", "Optional", "", "Rain at the crop")
-            + theme.tile("Soil moisture", "Optional", "", "For irrigation")
-            + theme.tile("Leaf wetness", "Optional", "", "For disease risk")
-            + theme.tile("Wireless link", "Ready", "", "Sends readings here")
-            + "</div>",
-            unsafe_allow_html=True,
-        )
 
 
 def _map_weather_snapshot(
@@ -1519,17 +1640,17 @@ def _render_station_map(
     pending = st.session_state.get(pending_key)
 
     area_km = float(station.get("area_radius_km") or (6 if str(project.get("kind")) == "plantation" else 12))
-    _page_intro("Map", "Set the pin and watch area.")
+    _page_intro("Map", "Station pin and forecast watch area.")
     st.markdown(
         '<div class="v-stats">'
-        + theme.stat_card("Latitude", f"{lat:.5f}", "°N", str(station.get("site", "")), "layers")
-        + theme.stat_card("Longitude", f"{lon:.5f}", "°E", str(project["label"]), "layers")
-        + theme.stat_card("Watch area", f"{area_km:.0f}", "km", "Circle on the map", "layers")
+        + theme.stat_card("Latitude", f"{lat:.4f}", "°N", str(station.get("site", "")), "layers")
+        + theme.stat_card("Longitude", f"{lon:.4f}", "°E", str(project["label"]), "layers")
+        + theme.stat_card("Watch area", f"{area_km:.0f}", "km", "Map circle", "layers")
         + theme.stat_card(
             "Next 24 h rain",
             "—" if weather.get("rain_24h") is None else f"{float(weather['rain_24h']):.1f}",
             "mm",
-            str(weather.get("watch", "Forecast area")),
+            str(weather.get("watch", "Outlook")),
             "drop",
         )
         + "</div>",
@@ -1637,10 +1758,7 @@ def _render_station_map(
             load_config.cache_clear()
             _load.clear()
             st.rerun()
-    st.caption(
-        "The map starts on Detailed streets so it always loads. "
-        "Use the layers button for satellite photos. Close-up satellite pictures are limited in this area."
-    )
+    st.caption("Starts on streets for reliable load · use layers for satellite (close-up limited here).")
 
 
 def _ensemble_rain_history(forecast_verification: pd.DataFrame) -> pd.DataFrame:
@@ -1685,22 +1803,36 @@ def _fmt_csi(value: float | None) -> str:
     return f"{float(value):.2f}"
 
 
-def _render_sensors_page(cfg: dict, project: dict, weather_readings: pd.DataFrame) -> None:
-    """Multi-domain sensor hub view for INDRA / ISSA."""
+def _render_sensors_page(
+    cfg: dict,
+    project: dict,
+    weather_readings: pd.DataFrame,
+    forecast: ForecastBundle | None = None,
+) -> None:
+    """Single Sensors screen for all Heimdall domains, including weather."""
     label = str(project.get("label", "project"))
-    domains = [d for d in project_domains(project) if d != "weather"]
-    _page_intro(
-        "Sensors",
-        f"Live-style telemetry for {label}. Weather stays on Overview/Data; "
-        "other domains are shown here (simulated until hardware is installed).",
-    )
+    domains = project_domains(project) or ["weather"]
     station_id = str(project["station"]["id"])
     tz = str(project["station"].get("timezone", "Asia/Kolkata"))
     names = domain_labels()
+    sim_hint = ""
+    if (
+        not weather_readings.empty
+        and "source" in weather_readings.columns
+        and not weather_readings["source"].eq("sensor").any()
+    ):
+        sim_hint = " Simulated data until hardware is installed."
 
-    if not domains:
-        st.info("No extra sensor domains configured for this project.")
-        return
+    _page_intro("Sensors", f"Live domains for {label}.{sim_hint}")
+    freshness_rows = _dataset_freshness_rows(
+        project=project,
+        cfg=cfg,
+        weather_readings=weather_readings,
+        tz=tz,
+        forecast=forecast,
+        include_analysis=True,
+    )
+    _render_dataset_freshness(freshness_rows)
 
     domain = st.radio(
         "Domain",
@@ -1708,39 +1840,124 @@ def _render_sensors_page(cfg: dict, project: dict, weather_readings: pd.DataFram
         format_func=lambda key: names.get(key, key),
         horizontal=True,
         key=f"sensor_domain_{project['id']}",
+        label_visibility="collapsed",
     )
-    latest = load_telemetry_latest(station_id=station_id, domain=domain, cfg=cfg)
-    series = load_telemetry(station_id=station_id, domain=domain, cfg=cfg)
     meta = DOMAIN_CHANNELS.get(domain, {})
+    domain_label = names.get(domain, domain)
+    selected_fresh = next((row for row in freshness_rows if row["name"] == domain_label), {})
+    updated_note = selected_fresh.get("relative", "No data")
+    if selected_fresh.get("absolute"):
+        updated_note = f"Updated {updated_note} · {selected_fresh['absolute']}"
+    else:
+        updated_note = f"Updated {updated_note}"
+    st.markdown(
+        theme.section(domain_label, f"{updated_note} · pick a channel for the trend"),
+        unsafe_allow_html=True,
+    )
 
-    if latest.empty:
-        st.warning(
-            f"No {names.get(domain, domain)} data yet. "
-            "Run `python scripts/run_heimdall_simulate.py` to seed simulated sensors."
+    # Weather uses the station readings table; other domains use telemetry.
+    if domain == "weather":
+        if weather_readings.empty:
+            st.info("No weather readings yet.")
+            return
+        latest_row = weather_readings.iloc[-1]
+        last_24h = _recent(weather_readings, 24)
+        wx_ts = _as_utc_ts(latest_row.get("timestamp"))
+        age_min, _sev = _freshness_age(wx_ts)
+        updated_foot = _format_updated_relative(age_min)
+        tiles = []
+        preferred = [
+            "temperature_c",
+            "humidity_pct",
+            "rainfall_mm",
+            "pressure_hpa",
+            "wind_speed_ms",
+            "wind_direction_deg",
+        ]
+        ordered = [c for c in preferred if c in meta and c in weather_readings.columns]
+        for channel in ordered:
+            info = meta[channel]
+            value = latest_row.get(channel)
+            unit = str(info.get("unit") or "")
+            text = "—" if value is None or pd.isna(value) else f"{float(value):.1f}"
+            accent = theme.CHANNEL_ACCENT.get(channel, theme.ACCENT)
+            spark = ""
+            if channel in last_24h.columns:
+                values = pd.to_numeric(last_24h[channel], errors="coerce").to_numpy(dtype=float)
+                spark = theme.sparkline(values, accent)
+            foot = _range_foot(last_24h, channel, 0 if channel == "humidity_pct" else 1)
+            if channel == "wind_direction_deg":
+                foot = _compass(value)
+            if foot:
+                foot = f"{foot} · {updated_foot}"
+            else:
+                foot = updated_foot
+            tiles.append(theme.tile(str(info["label"]), text, unit, foot, accent, spark))
+        st.markdown(theme.grid(tiles), unsafe_allow_html=True)
+        channel = st.selectbox(
+            "Show trend for",
+            ordered,
+            format_func=lambda key: str(meta[key]["label"]),
+            key=f"sensor_channel_{project['id']}_weather",
+        )
+        trend = weather_readings[["timestamp", channel]].dropna().copy()
+        trend = trend.rename(columns={channel: "value"})
+        fig = charts.telemetry_trend_chart(
+            trend,
+            title=str(meta[channel]["label"]),
+            unit=str(meta[channel].get("unit") or ""),
+            tz=tz,
+        )
+        if fig is not None:
+            st.plotly_chart(
+                fig, width="stretch", config={"displaylogo": False}, key=f"tel_weather_{channel}"
+            )
+        st.caption(
+            f"Last updated {updated_foot}"
+            + (f" · {_format_updated_absolute(wx_ts, tz)}" if wx_ts is not None else "")
         )
         return
 
+    latest = load_telemetry_latest(station_id=station_id, domain=domain, cfg=cfg)
+    series = load_telemetry(station_id=station_id, domain=domain, cfg=cfg)
+
+    if latest.empty:
+        st.info(f"No {names.get(domain, domain)} data yet.")
+        return
+
+    domain_ts = _as_utc_ts(pd.to_datetime(latest["timestamp"], utc=True).max())
+    age_min, _sev = _freshness_age(domain_ts)
+    updated_foot = _format_updated_relative(age_min)
+
     tiles = []
-    for _, row in latest.iterrows():
-        channel = str(row["channel"])
+    # Preserve catalogue order when possible
+    order = list(meta.keys())
+    latest_by = {str(r["channel"]): r for _, r in latest.iterrows()}
+    for channel in order:
+        if channel not in latest_by:
+            continue
+        row = latest_by[channel]
         info = meta.get(channel, {})
         value = row["value"]
         unit = str(row.get("unit") or info.get("unit") or "")
+        chan_ts = _as_utc_ts(row.get("timestamp"))
+        chan_age, _ = _freshness_age(chan_ts)
+        chan_foot = _format_updated_relative(chan_age)
         if channel == "camera_online":
             text = "Online" if float(value or 0) >= 0.5 else "Offline"
-            detail = "CCTV heartbeat"
+            unit_show = ""
         elif pd.isna(value):
             text = "—"
-            detail = unit
+            unit_show = unit
         else:
             text = f"{float(value):.2f}" if abs(float(value)) < 1000 else f"{float(value):.1f}"
-            detail = unit
+            unit_show = unit
         tiles.append(
             theme.tile(
                 str(info.get("label", channel)),
                 text,
-                "" if channel == "camera_online" else unit,
-                detail if channel != "camera_online" else "Simulated camera status",
+                unit_show,
+                chan_foot,
                 theme.ACCENT,
             )
         )
@@ -1750,35 +1967,28 @@ def _render_sensors_page(cfg: dict, project: dict, weather_readings: pd.DataFram
         online_row = latest.loc[latest["channel"] == "camera_online"]
         online = bool(float(online_row["value"].iloc[0]) >= 0.5) if not online_row.empty else False
         st.caption(
-            "CCTV pane shows status telemetry only (online, motion counts, frame age) — "
-            "not live video. Replace with a camera stream URL when hardware is ready."
+            f"{'Online' if online else 'Offline'} · status only · "
+            f"last updated {updated_foot}"
+            + (f" · {_format_updated_absolute(domain_ts, tz)}" if domain_ts is not None else "")
         )
-        st.markdown(
-            theme.panel(
-                "Camera status",
-                (
-                    f'<p style="color:#A0AEC0;margin:0;line-height:1.5">'
-                    f"{'Feed healthy' if online else 'Feed offline / stale'} · "
-                    f"station <code>{html.escape(station_id)}</code></p>"
-                ),
-                note="Simulated until installation",
-                tag="Online" if online else "Offline",
-                tag_class="up" if online else "down",
-            ),
-            unsafe_allow_html=True,
+    else:
+        st.caption(
+            f"Last updated {updated_foot}"
+            + (f" · {_format_updated_absolute(domain_ts, tz)}" if domain_ts is not None else "")
         )
 
-    channels = sorted(series["channel"].unique().tolist()) if not series.empty else []
+    channels = [c for c in order if c in set(series["channel"].astype(str))] if not series.empty else []
+    if not channels:
+        channels = sorted(series["channel"].unique().tolist()) if not series.empty else []
     if not channels:
         return
     channel = st.selectbox(
-        "Trend channel",
+        "Show trend for",
         channels,
         format_func=lambda key: str(meta.get(key, {}).get("label", key)),
         key=f"sensor_channel_{project['id']}_{domain}",
     )
-    subset = series.loc[series["channel"] == channel].copy()
-    subset = subset.sort_values("timestamp")
+    subset = series.loc[series["channel"] == channel].copy().sort_values("timestamp")
     unit = str(meta.get(channel, {}).get("unit") or "")
     fig = charts.telemetry_trend_chart(
         subset,
@@ -1787,12 +1997,9 @@ def _render_sensors_page(cfg: dict, project: dict, weather_readings: pd.DataFram
         tz=tz,
     )
     if fig is not None:
-        st.plotly_chart(fig, width="stretch", config={"displaylogo": False}, key=f"tel_{domain}_{channel}")
-
-    # Weather quick link for context
-    if not weather_readings.empty:
-        last_wx = pd.Timestamp(weather_readings.iloc[-1]["timestamp"]).tz_convert(tz)
-        st.caption(f"Weather last sample {last_wx.strftime('%d %b %Y · %H:%M IST')} (see Data / Overview).")
+        st.plotly_chart(
+            fig, width="stretch", config={"displaylogo": False}, key=f"tel_{domain}_{channel}"
+        )
 
 
 def _render_progress_page(
@@ -1811,9 +2018,8 @@ def _render_progress_page(
 
     history = _ensemble_rain_history(forecast_verification)
     if history.empty:
-        _page_intro("Progress", f"Scores appear after outlooks mature for {label}.")
-        st.info("No scored outlooks yet for this project.")
-        st.caption("Truth: Open-Meteo at the project pin. Run analysis to archive and verify.")
+        _page_intro("Progress", f"How well {label} forecasts matched real weather.")
+        st.info("No scored outlooks yet. They appear about 48 hours after Run analysis.")
         return
 
     issued = pd.to_datetime(history["issued_at"], utc=True)
@@ -2085,20 +2291,13 @@ def _render_progress_page(
         unsafe_allow_html=True,
     )
 
-    # 5. Charts
     st.markdown(
-        theme.section("Charts", "Lower day error is better. Higher CSI is better."),
+        theme.section("Charts", "Lower day error is better · higher CSI is better"),
         unsafe_allow_html=True,
     )
     left, right = st.columns(2, gap="medium")
     with left:
-        st.markdown(
-            theme.panel(
-                "Day rain error",
-                '<p style="color:#A0AEC0;font-size:.76rem;margin:0">Lower is better</p>',
-            ),
-            unsafe_allow_html=True,
-        )
+        st.caption("Day rain error · lower is better")
         bars = charts.skill_amount_bars(history)
         if bars is not None:
             st.plotly_chart(
@@ -2112,72 +2311,58 @@ def _render_progress_page(
                 line_amt, width="stretch", config={"displaylogo": False}, key="progress_daymae_line"
             )
     with right:
-        st.markdown(
-            theme.panel(
-                "Rain timing CSI",
-                '<p style="color:#A0AEC0;font-size:.76rem;margin:0">Higher is better</p>',
-            ),
-            unsafe_allow_html=True,
-        )
+        st.caption("Rain timing CSI · higher is better")
         line = charts.skill_history_chart(history, "csi", "CSI", better="higher")
         if line is not None:
             st.plotly_chart(
                 line, width="stretch", config={"displaylogo": False}, key="progress_csi_line"
             )
 
-    # 6. Full history
-    st.markdown(
-        theme.section("History", "All scored outlooks, oldest first."),
-        unsafe_allow_html=True,
-    )
-    table = history.copy()
-    table["#"] = range(1, len(table) + 1)
-    table["Date"] = pd.to_datetime(table["issued_at"], utc=True).dt.tz_convert(tz).dt.strftime(
-        "%d %b %Y · %H:%M"
-    )
-    if show_bias_fix:
-        table["Era"] = np.where(
-            pd.to_datetime(table["issued_at"], utc=True) < fix_at,
-            "Before fix",
-            "After fix",
+    with st.expander(f"Full history · {len(history)} scored outlooks", expanded=False):
+        table = history.copy()
+        table["#"] = range(1, len(table) + 1)
+        table["Date"] = pd.to_datetime(table["issued_at"], utc=True).dt.tz_convert(tz).dt.strftime(
+            "%d %b %Y · %H:%M"
         )
-    table["Day error (mm)"] = pd.to_numeric(table["daily_mae"], errors="coerce").map(
-        lambda v: f"{v:.1f}" if pd.notna(v) else "—"
-    )
-    table["How close?"] = pd.to_numeric(table["daily_mae"], errors="coerce").map(
-        lambda v: _skill_band(v, skill)
-    )
-    table["CSI"] = pd.to_numeric(table["csi"], errors="coerce").map(
-        lambda v: f"{v:.2f}" if pd.notna(v) else "—"
-    )
-    table["CSI 6h"] = (
-        pd.to_numeric(table["csi_6h"], errors="coerce").map(
+        if show_bias_fix:
+            table["Era"] = np.where(
+                pd.to_datetime(table["issued_at"], utc=True) < fix_at,
+                "Before fix",
+                "After fix",
+            )
+        table["Day error (mm)"] = pd.to_numeric(table["daily_mae"], errors="coerce").map(
+            lambda v: f"{v:.1f}" if pd.notna(v) else "—"
+        )
+        table["How close?"] = pd.to_numeric(table["daily_mae"], errors="coerce").map(
+            lambda v: _skill_band(v, skill)
+        )
+        table["CSI"] = pd.to_numeric(table["csi"], errors="coerce").map(
             lambda v: f"{v:.2f}" if pd.notna(v) else "—"
         )
-        if "csi_6h" in table.columns
-        else "—"
-    )
-    table["Hit %"] = pd.to_numeric(table["hit_rate"], errors="coerce").map(
-        lambda v: f"{100 * v:.0f}%" if pd.notna(v) else "—"
-    )
-    table["Hours checked"] = table["n"].astype(int)
-    history_cols = [
-        "#",
-        "Date",
-        *(["Era"] if show_bias_fix else []),
-        "How close?",
-        "Day error (mm)",
-        "CSI",
-        "CSI 6h",
-        "Hit %",
-        "Hours checked",
-    ]
-    st.dataframe(
-        table[history_cols],
-        width="stretch",
-        hide_index=True,
-    )
-    st.caption("Scores update after each analysis once an outlook is old enough. Pin weather, not a gauge.")
+        table["CSI 6h"] = (
+            pd.to_numeric(table["csi_6h"], errors="coerce").map(
+                lambda v: f"{v:.2f}" if pd.notna(v) else "—"
+            )
+            if "csi_6h" in table.columns
+            else "—"
+        )
+        table["Hit %"] = pd.to_numeric(table["hit_rate"], errors="coerce").map(
+            lambda v: f"{100 * v:.0f}%" if pd.notna(v) else "—"
+        )
+        table["Hours checked"] = table["n"].astype(int)
+        history_cols = [
+            "#",
+            "Date",
+            *(["Era"] if show_bias_fix else []),
+            "How close?",
+            "Day error (mm)",
+            "CSI",
+            "CSI 6h",
+            "Hit %",
+            "Hours checked",
+        ]
+        st.dataframe(table[history_cols], width="stretch", hide_index=True)
+        st.caption("New scores appear about 48 hours after each Run analysis.")
 
 
 
@@ -2200,10 +2385,10 @@ def main() -> None:
             f"""
             <div class="brand">
               <div class="brand-mark">H</div>
-              <div><strong>{html.escape(product_name(base_cfg).upper())}</strong>
-              <small>{html.escape(product_tagline(base_cfg).upper())}</small></div>
+              <div><strong>{html.escape(product_name(base_cfg))}</strong>
+              <small>INDRA · ISSA</small></div>
             </div>
-            <div class="nav-kicker">PROJECTS</div>
+            <div class="nav-kicker">PROJECT</div>
             """,
             unsafe_allow_html=True,
         )
@@ -2221,13 +2406,17 @@ def main() -> None:
         )
         project = projects[project_id]
         station_preview = project["station"]
+        site_bits = [
+            str(station_preview.get("district") or "").strip(),
+            str(project.get("kind", "")).replace("dam", "Dam").replace("plantation", "Plantation"),
+        ]
+        site_line = " · ".join(bit for bit in site_bits if bit)
         st.markdown(
             f"""
             <div class="side-meta">
               <div class="k">Station</div>
               <div class="v">{html.escape(str(station_preview["name"]))}</div>
-              <div class="s">{html.escape(str(station_preview.get("district", "")))} |
-                {html.escape(str(project["blurb"]))}</div>
+              <div class="s">{html.escape(site_line)}</div>
             </div>
             """,
             unsafe_allow_html=True,
@@ -2266,9 +2455,9 @@ def main() -> None:
                     st.error(result.get("error") or "Analysis finished with errors.")
             st.rerun()
         st.markdown(
-            '<div class="help-card"><strong>Need help?</strong>'
-            "<small>Use Settings for models and thresholds. "
-            "After model changes, press Run analysis.</small></div>",
+            '<div class="help-card"><strong>How to read Heimdall</strong>'
+            "<small>Overview: now · Sensors: live readings · Forecast: next week · "
+            "Progress: forecast skill · Run analysis refreshes models.</small></div>",
             unsafe_allow_html=True,
         )
 
@@ -2314,24 +2503,24 @@ def main() -> None:
         and not readings["source"].eq("sensor").any()
     )
     if str(project["kind"]) == "plantation" and readings.empty:
-        status = ("Station not connected yet", "pill-idle")
+        status = ("Waiting for station", "pill-idle")
     elif using_practice_data:
-        status = ("Practice data only", "pill-idle")
+        status = ("Simulated sensors", "pill-idle")
     elif coeffs.empty:
-        status = ("Sensor setup needed", "pill-idle")
+        status = ("Weather not calibrated", "pill-idle")
     elif alerts:
-        status = ("Sensor drift needs attention", "pill-warn")
+        status = ("Sensor drift", "pill-warn")
     else:
-        status = ("Sensors look healthy", "pill-ok")
+        status = ("Sensors healthy", "pill-ok")
 
+    now_local = pd.Timestamp.now(tz=tz)
     if readings.empty:
-        stamp = f"Clock {pd.Timestamp.now(tz=tz).strftime('%d %b %Y · %H:%M IST')}"
+        stamp = now_local.strftime("%d %b · %H:%M IST")
     else:
         latest_ts = pd.Timestamp(readings.iloc[-1]["timestamp"]).tz_convert(tz)
-        stamp = (
-            f"Now {pd.Timestamp.now(tz=tz).strftime('%d %b %Y · %H:%M IST')} · "
-            f"last reading {latest_ts.strftime('%d %b %Y · %H:%M IST')}"
-        )
+        same_day = latest_ts.date() == now_local.date()
+        read_fmt = "%H:%M" if same_day else "%d %b %H:%M"
+        stamp = f"{now_local.strftime('%d %b · %H:%M IST')} · reading {latest_ts.strftime(read_fmt)}"
 
     _masthead(station, status, stamp, str(project["label"]))
 
@@ -2363,17 +2552,7 @@ def main() -> None:
         return
 
     page = _section_nav(
-        [
-            "Overview",
-            "Sensors",
-            "Forecast",
-            "Map",
-            "Data",
-            "Analytics",
-            "Progress",
-            "Sources",
-            "Settings",
-        ],
+        ["Overview", "Sensors", "Forecast", "Map", "Progress", "Settings"],
         key="hub_section",
         default="Overview",
     )
@@ -2387,10 +2566,7 @@ def main() -> None:
 
         @st.fragment(run_every=timedelta(seconds=min(60, auto_mins * 60)))
         def _auto_ui_refresh() -> None:
-            st.caption(
-                f"Charts auto-reload every {auto_mins} min · "
-                "full analysis still needs Run analysis"
-            )
+            st.caption(f"Charts refresh every {auto_mins} min · Run analysis for full update")
             elapsed = _time.time() - float(st.session_state.get("_hub_ui_refresh_at", _time.time()))
             if elapsed >= auto_mins * 60:
                 st.session_state["_hub_ui_refresh_at"] = _time.time()
@@ -2417,6 +2593,16 @@ def main() -> None:
                     confidence_note="Outlook unavailable",
                 )
             )
+            _render_dataset_freshness(
+                _dataset_freshness_rows(
+                    project=project,
+                    cfg=cfg,
+                    weather_readings=readings,
+                    tz=tz,
+                    forecast=None,
+                    include_analysis=True,
+                )
+            )
         else:
             _forecast_overview(
                 display_forecast,
@@ -2433,35 +2619,27 @@ def main() -> None:
             )
 
     if page == "Sensors":
-        _render_sensors_page(cfg, project, readings)
+        _render_sensors_page(cfg, project, readings, forecast=display_forecast)
 
     if page == "Forecast":
-        _page_intro(
-            "7-day forecast",
-            "Interactive rain, temperature, wind, and model agreement for this project.",
+        _page_intro("Forecast", "Plain-language week summary, then interactive charts.")
+        _render_dataset_freshness(
+            _dataset_freshness_rows(
+                project=project,
+                cfg=cfg,
+                weather_readings=readings,
+                tz=tz,
+                forecast=display_forecast,
+                include_analysis=True,
+            ),
+            title="Data freshness",
         )
         if display_forecast is None:
-            st.info("Weekly forecast unavailable. Try Run analysis or Reload UI.")
+            st.info("Weekly forecast unavailable. Try Run analysis.")
             if forecast_error:
                 st.caption(forecast_error)
         else:
             daily = _with_wet_hours(display_forecast.daily, display_forecast.hourly, tz)
-            first_day = pd.Timestamp(daily.iloc[0]["date"]).strftime("%d %b")
-            last_day = pd.Timestamp(daily.iloc[-1]["date"]).strftime("%d %b %Y")
-            members = list((cfg.get("forecast") or {}).get("ensemble_members") or [])
-            member_note = ", ".join(
-                {"ecmwf": "ECMWF", "gfs": "GFS", "met_norway": "MET Norway"}.get(m, m)
-                for m in members
-            )
-            st.caption(
-                f"{first_day} – {last_day}"
-                + (f" · models {member_note}" if member_note else "")
-                + (
-                    f" · ensemble spread {ensemble_spread:.1f} °C"
-                    if ensemble_spread is not None and np.isfinite(ensemble_spread)
-                    else ""
-                )
-            )
             payload = build_forecast_payload(
                 daily=daily,
                 hourly=display_forecast.hourly,
@@ -2470,7 +2648,7 @@ def main() -> None:
                 theme_id=_active_theme_id(cfg),
                 project_kind=str(project.get("kind", "dam")),
             )
-            components.html(render_forecast_board_html(payload), height=1120, scrolling=False)
+            components.html(render_forecast_board_html(payload), height=980, scrolling=False)
 
     if page == "Map":
         _render_station_map(
@@ -2479,573 +2657,10 @@ def main() -> None:
             _map_weather_snapshot(display_forecast, project, readings),
         )
 
-    if page == "Analytics":
-        _page_intro(
-            "Station checks",
-            "Sensor setup quality and local prediction tests. "
-            "For the interactive 7-day outlook, open Forecast.",
-        )
-
-    if page == "Data":
-        _page_intro(
-            "Station readings",
-            (
-                "Station offline. Overview still shows the area forecast."
-                if str(project["kind"]) == "plantation" and readings.empty
-                else "Practice data until the real station is online."
-                if using_practice_data
-                else "Latest values from the station."
-            ),
-        )
-        if not readings.empty:
-            st.markdown(theme.section("Now", f"Last {window.lower()}."), unsafe_allow_html=True)
-            _conditions(cfg, readings)
-        else:
-            st.info(
-                "No station readings yet."
-                if str(project["kind"]) != "plantation"
-                else "Waiting for the solar station."
-            )
-        if alerts:
-            st.warning("  \n".join(f"- {a}" for a in alerts))
-
-        st.markdown(
-            theme.section("Temperature", f"Last {window.lower()}."),
-            unsafe_allow_html=True,
-        )
-        st.plotly_chart(
-            charts.series_chart(
-                "temperature_c", "°C", _label(cfg, "temperature_c"),
-                readings_w, reference_w, calibrated_w, tz, show_raw, show_cal, show_ref,
-            ),
-            width="stretch",
-            config={"displaylogo": False},
-            key="chart_live_temperature",
-        )
-
-        left, right = st.columns((1, 1))
-        with left:
-            st.markdown(
-                theme.section("Wind direction", "Which way the wind usually comes from"),
-                unsafe_allow_html=True,
-            )
-            rose = charts.wind_rose(readings_w)
-            if rose is None:
-                st.caption("Not enough wind data yet.")
-            else:
-                st.plotly_chart(
-                    rose, width="stretch", config={"displaylogo": False}, key="chart_wind_rose"
-                )
-        with right:
-            st.markdown(
-                theme.section("Are the readings usable?", "A quick check for missing or unusual data"),
-                unsafe_allow_html=True,
-            )
-            temp_cal = (
-                calibrated.loc[calibrated["channel"] == "temperature_c"]
-                if not calibrated.empty
-                else calibrated
-            )
-            mae_7d = (
-                window_metrics(temp_cal, hours=168)["mae"] if not temp_cal.empty else float("nan")
-            )
-            best_fc = "—"
-            if not scores.empty:
-                temp_scores = scores.loc[scores["channel"] == "temperature_c"]
-                if not temp_scores.empty:
-                    best_fc = f"{float(temp_scores['mae'].min()):.1f}"
-            good_pct = float("nan")
-            if not calibrated.empty:
-                flags = calibrated["quality_flag"].value_counts()
-                total = int(flags.sum())
-                good_pct = 100.0 * int(flags.get("good", 0)) / total if total else float("nan")
-
-            st.markdown(
-                theme.grid(
-                    [
-                        theme.tile("Station readings", f"{len(readings_all):,}", "", "stored samples"),
-                        theme.tile("Area weather readings", f"{len(reference):,}", "", "used as a check"),
-                        theme.tile(
-                            "Average temperature gap",
-                            _num(mae_7d, 1),
-                            "°C",
-                            "station compared with area weather",
-                        ),
-                        theme.tile("Usable readings", _num(good_pct, 0), "%", "passed basic checks"),
-                        theme.tile(
-                            "Sensor setup",
-                            "Ready" if not coeffs.empty else "Not ready",
-                            "",
-                            f"{len(coeffs)} measurements checked" if not coeffs.empty else "needs checking",
-                        ),
-                    ]
-                ),
-                unsafe_allow_html=True,
-            )
-
-    if page == "Data":
-        st.markdown(
-            theme.section(
-                "How the weather changed",
-                "Choose one item, such as rain or temperature, to see earlier readings.",
-            ),
-            unsafe_allow_html=True,
-        )
-        channel = st.selectbox(
-            "Show",
-            list(CHANNEL_NAMES),
-            format_func=lambda c: cfg["channels"].get(c, {}).get("label", c),
-            key="trend_channel",
-        )
-        unit = _unit(cfg, channel)
-        channel_cal = (
-            calibrated_w.loc[calibrated_w["channel"] == channel]
-            if not calibrated_w.empty
-            else calibrated_w
-        )
-        if not channel_cal.empty:
-            stats = window_metrics(channel_cal, hours=hours or 24 * 365)
-            tiles = [
-                theme.tile("Average gap", _num(stats["mae"], 1), unit, "station vs area weather"),
-                theme.tile(
-                    "Usual direction",
-                    _num(stats["bias"], 1),
-                    unit,
-                    "plus means station is higher",
-                ),
-            ]
-            if not coeffs.empty and channel in set(coeffs["channel"]):
-                row = coeffs.loc[coeffs["channel"] == channel].iloc[0]
-                tiles.append(
-                    theme.tile(
-                        "Gap before and after setup",
-                        f"{float(row['mae_raw']):.1f} → {float(row['mae']):.1f}",
-                        unit,
-                        "smaller is better",
-                        theme.ACCENT,
-                    )
-                )
-            st.markdown(theme.grid(tiles), unsafe_allow_html=True)
-
-        st.plotly_chart(
-            charts.series_chart(
-                channel, unit, _label(cfg, channel),
-                readings_w, reference_w, calibrated_w, tz, show_raw, show_cal, show_ref,
-            ),
-            width="stretch",
-            config={"displaylogo": False},
-            key=f"chart_trend_{channel}",
-        )
-
-        st.markdown(
-            theme.section(
-                "Typical day pattern",
-                "Shows the usual change from morning to night",
-            ),
-            unsafe_allow_html=True,
-        )
-        heat = charts.diurnal_heatmap(calibrated_w, channel, unit, tz)
-        if heat is None:
-            st.caption("Need at least two days of adjusted station data.")
-        else:
-            st.plotly_chart(
-                heat,
-                width="stretch",
-                config={"displaylogo": False},
-                key=f"chart_heat_{channel}",
-            )
-
-    if page == "Analytics":
-        st.markdown(
-            theme.section(
-                "Are the sensors set up correctly?",
-                "A smaller gap after setup means the sensor reading improved. "
-                "A larger percentage means a bigger improvement.",
-            ),
-            unsafe_allow_html=True,
-        )
-        if coeffs.empty:
-            st.info("The sensors have not been checked yet.")
-        else:
-            improvements = [
-                theme.tile(
-                    cfg["channels"][row["channel"]].get("label", row["channel"]),
-                    f"{100.0 * (1 - float(row['mae']) / float(row['mae_raw'])):.0f}%",
-                    "",
-                    f"Error fell from {float(row['mae_raw']):.1f} to {float(row['mae']):.1f} "
-                    f"{cfg['channels'][row['channel']]['unit']}",
-                    theme.CHANNEL_ACCENT.get(row["channel"], theme.ACCENT),
-                )
-                for _, row in coeffs.iterrows()
-                if float(row["mae_raw"]) > 0
-            ]
-            st.markdown(theme.grid(improvements), unsafe_allow_html=True)
-
-            with st.expander("Show setup details"):
-                table = pd.DataFrame(
-                    {
-                        "Reading": coeffs["channel"].map(
-                            lambda c: cfg["channels"].get(c, {}).get("label", c)
-                        ),
-                        "Readings used": coeffs["n_points"],
-                        "Gap before": coeffs["mae_raw"].map("{:.2f}".format),
-                        "Gap after": coeffs["mae"].map("{:.2f}".format),
-                        "Gap on new data": coeffs["mae_holdout"].map(
-                            lambda v: f"{v:.2f}" if pd.notna(v) else "—"
-                        ),
-                    }
-                )
-                st.dataframe(table, width="stretch", hide_index=True)
-                st.caption("Smaller gaps are better.")
-
-        if not calibrated.empty:
-            flags = calibrated["quality_flag"].value_counts()
-            total = int(flags.sum())
-            st.markdown(
-                theme.section("Stored readings", "How many readings look usable"),
-                unsafe_allow_html=True,
-            )
-            st.markdown(
-                theme.grid(
-                    [
-                        theme.tile(
-                            name,
-                            f"{int(flags.get(flag, 0)):,}",
-                            "",
-                            f"{100.0 * int(flags.get(flag, 0)) / total if total else 0:.0f}% of readings",
-                            color,
-                        )
-                        for flag, name, color in (
-                            ("good", "Good", theme.ACCENT),
-                            ("suspect", "May be wrong", theme.WARN),
-                            ("missing", "Missing", theme.DANGER),
-                        )
-                    ]
-                ),
-                unsafe_allow_html=True,
-            )
-
-    if page == "Analytics":
-        st.markdown(
-            theme.section(
-                "Did our local prediction work?",
-                "We compare an old prediction with what happened later. "
-                "This does not change the rain forecast on Overview.",
-            ),
-            unsafe_allow_html=True,
-        )
-        if scores.empty or predictions.empty:
-            st.info("No test result is available yet.")
-        else:
-            fc_channel = st.selectbox(
-                "Show results for",
-                sorted(scores["channel"].unique().tolist()),
-                format_func=lambda c: cfg["channels"].get(c, {}).get("label", c),
-                key="forecast_channel",
-            )
-            unit = _unit(cfg, fc_channel)
-            subset = scores.loc[scores["channel"] == fc_channel].copy()
-            if (
-                fc_channel == "rainfall_mm"
-                and "csi" in subset.columns
-                and subset["csi"].notna().any()
-            ):
-                timing = subset.sort_values(["csi", "mae"], ascending=[False, True]).iloc[0]
-                if "daily_mae" in subset.columns and subset["daily_mae"].notna().any():
-                    amount = subset.sort_values(["daily_mae", "mae"], ascending=[True, True]).iloc[0]
-                else:
-                    amount = timing
-                score_tiles = [
-                    theme.tile(
-                        "Best rain timing",
-                        _friendly_model_name(str(timing["model"])),
-                        "",
-                        (
-                            f"CSI {_num(float(timing['csi']), 2)}"
-                            + (
-                                f" · 6h {_num(float(timing['csi_6h']), 2)}"
-                                if "csi_6h" in timing.index and pd.notna(timing.get("csi_6h"))
-                                else ""
-                            )
-                            + (
-                                f" · 24h {_num(float(timing['csi_24h']), 2)}"
-                                if "csi_24h" in timing.index and pd.notna(timing.get("csi_24h"))
-                                else ""
-                            )
-                        ),
-                        theme.ACCENT,
-                    ),
-                    theme.tile(
-                        "Best daily rain amount",
-                        _friendly_model_name(str(amount["model"])),
-                        "",
-                        (
-                            f"day gap {_num(float(amount['daily_mae']), 1)} mm"
-                            if pd.notna(amount.get("daily_mae"))
-                            else "daily score not ready"
-                        ),
-                    ),
-                    theme.tile(
-                        "Hours caught",
-                        (
-                            f"{100.0 * float(timing['hit_rate']):.0f}%"
-                            if "hit_rate" in timing.index and pd.notna(timing.get("hit_rate"))
-                            else "—"
-                        ),
-                        "",
-                        "share of real wet hours predicted",
-                    ),
-                ]
-                best = amount
-            else:
-                subset = subset.sort_values("mae")
-                best = subset.iloc[0]
-                naive = subset.loc[subset["model"].str.startswith("persistence")]
-                gain = "—"
-                if not naive.empty and float(naive["mae"].min()) > 0:
-                    gain = f"{100.0 * (1 - float(best['mae']) / float(naive['mae'].min())):.0f}%"
-                score_tiles = [
-                    theme.tile(
-                        "Best result came from",
-                        _friendly_model_name(str(best["model"])),
-                        "",
-                        "tested on past weather",
-                        theme.ACCENT,
-                    ),
-                    theme.tile(
-                        "Average gap",
-                        _num(float(best["mae"]), 1),
-                        unit,
-                        "smaller is better",
-                    ),
-                    theme.tile(
-                        "Better than a simple guess",
-                        gain,
-                        "",
-                        "higher is better",
-                    ),
-                ]
-
-            st.markdown(theme.grid(score_tiles), unsafe_allow_html=True)
-
-            st.markdown(
-                theme.section(
-                    "Prediction compared with real weather",
-                    "Lines that stay close together mean a better result.",
-                ),
-                unsafe_allow_html=True,
-            )
-            st.plotly_chart(
-                charts.forecast_chart(predictions, fc_channel, unit, _label(cfg, fc_channel), tz),
-                width="stretch",
-                config={"displaylogo": False},
-                key=f"chart_forecast_{fc_channel}",
-            )
-
-            with st.expander("Show more test details"):
-                detail = {
-                    "Method": subset["model"].map(_friendly_model_name),
-                    "Hours predicted": subset["forecast_hours"],
-                    "Average gap": subset["mae"].map("{:.2f}".format),
-                }
-                if fc_channel == "rainfall_mm" and "csi" in subset.columns:
-                    detail["Wet-hour score"] = subset["csi"].map(
-                        lambda v: f"{v:.2f}" if pd.notna(v) else "—"
-                    )
-                    if "hit_rate" in subset.columns:
-                        detail["Hours caught"] = subset["hit_rate"].map(
-                            lambda v: f"{100.0 * v:.0f}%" if pd.notna(v) else "—"
-                        )
-                    if "daily_mae" in subset.columns:
-                        detail["Daily rain gap"] = subset["daily_mae"].map(
-                            lambda v: f"{v:.1f} mm" if pd.notna(v) else "—"
-                        )
-                    if "csi_6h" in subset.columns:
-                        detail["CSI 6h"] = subset["csi_6h"].map(
-                            lambda v: f"{v:.2f}" if pd.notna(v) else "—"
-                        )
-                    if "csi_24h" in subset.columns:
-                        detail["CSI 24h"] = subset["csi_24h"].map(
-                            lambda v: f"{v:.2f}" if pd.notna(v) else "—"
-                        )
-                    if "block_24h_mae" in subset.columns:
-                        detail["24h rain gap"] = subset["block_24h_mae"].map(
-                            lambda v: f"{v:.1f} mm" if pd.notna(v) else "—"
-                        )
-                table = pd.DataFrame(detail)
-                st.dataframe(table, width="stretch", hide_index=True)
-
-                if not walkforward.empty:
-                    wf_table = walkforward.copy()
-                    wf_table["Reading"] = wf_table["channel"].map(
-                        lambda value: CHANNEL_LABELS.get(str(value), str(value))
-                    )
-                    wf_table["Method"] = wf_table["model"].map(_friendly_model_name)
-                    wf_table["Hours ahead"] = wf_table["lead_hours"]
-                    wf_table["Average gap"] = wf_table["mae"].map("{:.2f}".format)
-                    st.write("Repeated tests at different times:")
-                    st.dataframe(
-                        wf_table[
-                            ["Reading", "Method", "Hours ahead", "Average gap"]
-                        ],
-                        width="stretch",
-                        hide_index=True,
-                    )
-
     if page == "Progress":
         _render_progress_page(forecast_verification, tz, project, cfg=cfg)
 
     if page == "Settings":
         _render_settings_page(cfg, projects)
-
-    if page == "Sources":
-        _data_sources_panel(nwp_members, reference, power, imd)
-        st.markdown(
-            theme.section(
-                "Do the weather services give similar answers?",
-                "We compare free weather services for this project pin. "
-                "They will not match exactly because each service looks at a wide area.",
-            ),
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            theme.section(
-                "How close are they?",
-                "A smaller gap means the services agree more.",
-            ),
-            unsafe_allow_html=True,
-        )
-        if source_validation.empty:
-            st.info(
-                "No result is ready yet."
-            )
-        else:
-            val_table = source_validation.copy()
-            units = {
-                "temperature_c": "°C",
-                "humidity_pct": "%",
-                "pressure_hpa": "hPa",
-                "rainfall_mm": "mm",
-                "wind_speed_ms": "m/s",
-                "wind_direction_deg": "°",
-            }
-            val_table["Measurement"] = val_table["channel"].map(
-                lambda value: CHANNEL_LABELS.get(str(value), str(value))
-            )
-            val_table["Compared sources"] = val_table.apply(
-                lambda row: (
-                    f"{SOURCE_DETAILS.get(str(row['source_a']), (str(row['source_a']), '', ''))[0]}"
-                    " vs "
-                    f"{SOURCE_DETAILS.get(str(row['source_b']), (str(row['source_b']), '', ''))[0]}"
-                ),
-                axis=1,
-            )
-            val_table["Average difference"] = val_table.apply(
-                lambda row: f"{float(row['mae']):.1f} {units.get(str(row['channel']), '')}",
-                axis=1,
-            )
-            val_table["How close?"] = val_table.apply(
-                lambda row: _comparison_meaning(float(row["mae"]), str(row["channel"]))[0],
-                axis=1,
-            )
-            st.dataframe(
-                val_table[
-                    [
-                        "Measurement",
-                        "Compared sources",
-                        "How close?",
-                        "Average difference",
-                    ]
-                ],
-                width="stretch",
-                hide_index=True,
-            )
-            st.caption(
-                "This only compares the services. It does not prove the exact weather at the dam."
-            )
-        if not forecast_verification.empty:
-            st.markdown(
-                theme.section(
-                    "Were earlier forecasts close?",
-                    "How the Overview rain outlook did once truth arrived.",
-                ),
-                unsafe_allow_html=True,
-            )
-            fv = forecast_verification.copy()
-            fv["Measurement"] = fv["channel"].map(
-                lambda value: CHANNEL_LABELS.get(str(value), str(value))
-            )
-            fv["Date"] = pd.to_datetime(fv["issued_at"], utc=True).dt.tz_convert(
-                tz
-            ).dt.strftime("%d %b %Y · %H:%M")
-            fv["Source checked"] = fv["model"].map(
-                {
-                    "ensemble_operational": "Overview vs Open-Meteo",
-                    "open_meteo_operational": "Open-Meteo only",
-                    "ensemble_vs_imd": "Overview vs IMD daily",
-                    "open_meteo_vs_imd": "Open-Meteo vs IMD daily",
-                }
-            ).fillna(fv["model"])
-            units = {
-                "temperature_c": "°C",
-                "humidity_pct": "%",
-                "rainfall_mm": "mm",
-            }
-            fv["Average difference"] = fv.apply(
-                lambda row: (
-                    f"{float(row['mae']):.1f} {units.get(str(row['channel']), '')}"
-                ),
-                axis=1,
-            )
-
-            rain_fv = fv[fv["channel"] == "rainfall_mm"].copy()
-            if not rain_fv.empty and "csi" in rain_fv.columns and rain_fv["csi"].notna().any():
-                def _fmt_opt(value, digits=2):
-                    if value is None or (isinstance(value, float) and pd.isna(value)):
-                        return "—"
-                    return f"{float(value):.{digits}f}"
-
-                rain_fv["Daily error (mm)"] = rain_fv["daily_mae"].map(lambda v: _fmt_opt(v, 1))
-                rain_fv["CSI"] = rain_fv["csi"].map(lambda v: _fmt_opt(v, 2))
-                rain_fv["CSI 6h"] = (
-                    rain_fv["csi_6h"].map(lambda v: _fmt_opt(v, 2))
-                    if "csi_6h" in rain_fv.columns
-                    else "—"
-                )
-                rain_fv["CSI 24h"] = (
-                    rain_fv["csi_24h"].map(lambda v: _fmt_opt(v, 2))
-                    if "csi_24h" in rain_fv.columns
-                    else "—"
-                )
-                st.caption(
-                    "Rain checked two ways: Open-Meteo (hourly timing) and IMD (daily totals). "
-                    "Neither is a dam rain gauge."
-                )
-                st.dataframe(
-                    rain_fv[
-                        [
-                            "Date",
-                            "Source checked",
-                            "Daily error (mm)",
-                            "CSI",
-                            "CSI 6h",
-                            "CSI 24h",
-                            "Average difference",
-                        ]
-                    ],
-                    width="stretch",
-                    hide_index=True,
-                )
-            else:
-                st.dataframe(
-                    fv[["Date", "Measurement", "Source checked", "Average difference"]],
-                    width="stretch",
-                    hide_index=True,
-                )
-                if rain_fv.empty:
-                    st.caption(
-                        "Rain verification appears after an archived outlook is about 48 hours old."
-                    )
-
 
 main()

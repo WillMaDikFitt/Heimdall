@@ -22,26 +22,26 @@ DOMAIN_CHANNELS: dict[str, dict[str, dict[str, Any]]] = {
         "seepage_lpm": {"label": "Seepage flow", "unit": "L/min"},
     },
     "cctv": {
-        "camera_online": {"label": "Camera online", "unit": "0/1"},
-        "motion_events": {"label": "Motion events", "unit": "count/5min"},
-        "last_frame_age_s": {"label": "Last frame age", "unit": "s"},
+        "camera_online": {"label": "Camera", "unit": ""},
+        "motion_events": {"label": "Motion", "unit": "/5 min"},
+        "last_frame_age_s": {"label": "Frame age", "unit": "s"},
     },
     "soil": {
-        "soil_moisture_pct": {"label": "Soil moisture", "unit": "%"},
-        "soil_ec_ms_cm": {"label": "Electrical conductivity (EC)", "unit": "mS/cm"},
-        "soil_ph": {"label": "Soil pH", "unit": "pH"},
-        "soil_n_mg_kg": {"label": "Nitrogen (N)", "unit": "mg/kg"},
-        "soil_p_mg_kg": {"label": "Phosphorus (P)", "unit": "mg/kg"},
-        "soil_k_mg_kg": {"label": "Potassium (K)", "unit": "mg/kg"},
+        "soil_moisture_pct": {"label": "Moisture", "unit": "%"},
+        "soil_ec_ms_cm": {"label": "EC", "unit": "mS/cm"},
+        "soil_ph": {"label": "pH", "unit": ""},
+        "soil_n_mg_kg": {"label": "N", "unit": "mg/kg"},
+        "soil_p_mg_kg": {"label": "P", "unit": "mg/kg"},
+        "soil_k_mg_kg": {"label": "K", "unit": "mg/kg"},
     },
 }
 
 DOMAIN_LABELS = {
     "weather": "Weather",
-    "hydro": "Water (level & velocity)",
+    "hydro": "Water",
     "seepage": "Seepage",
-    "cctv": "CCTV status",
-    "soil": "Soil / NPK",
+    "cctv": "CCTV",
+    "soil": "Soil",
 }
 
 DEFAULT_PROJECT_DOMAINS = {

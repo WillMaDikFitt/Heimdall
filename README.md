@@ -15,6 +15,17 @@ NPK uses chemistry-correct labels: **N** = nitrogen, **P** = phosphorus, **K** =
 
 CCTV is status telemetry only (online / motion / frame age), not a live video stream.
 
+## Hub pages
+
+| Page | Purpose |
+|---|---|
+| **Overview** | What is happening now |
+| **Sensors** | All domain readings (weather, hydro, soil, …) |
+| **Forecast** | Next 7 days |
+| **Map** | Project pins |
+| **Progress** | How good past forecasts were |
+| **Settings** | Display, models, thresholds |
+
 ## Quick start
 
 ```bash
@@ -25,6 +36,9 @@ pip install -r requirements.txt
 # Seed simulated weather + domain sensors for INDRA and ISSA
 python scripts/run_heimdall_simulate.py
 
+# Optional: restore older prediction history from data/weather.db
+python scripts/migrate_weather_to_heimdall.py
+
 # Hub UI
 streamlit run app/dashboard.py
 
@@ -34,11 +48,12 @@ python scripts/run_refresh_hub.py
 
 ## Layout
 
-- `app/dashboard.py` — Heimdall Streamlit hub (Overview, Sensors, Forecast, …)
-- `src/telemetry/` — multi-domain sensor catalogue, SQLite store, simulators
-- `src/hub_refresh.py` — shared weather analysis pipeline
-- `config.yaml` — product name, projects, pins, forecast settings
-- `data/heimdall.db` — local SQLite (generated)
+- `app/dashboard.py` — Heimdall Streamlit hub
+- `src/telemetry/` — multi-domain sensors + simulators
+- `src/hub_refresh.py` — weather analysis pipeline
+- `config.yaml` — projects and settings
+- `data/heimdall.db` — active database
+- `data/weather.db` — optional backup of the older weather-only DB
 
 ## Notes
 

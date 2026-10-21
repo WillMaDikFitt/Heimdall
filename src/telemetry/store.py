@@ -131,3 +131,32 @@ def load_telemetry_latest(
         return frame
     frame = frame.sort_values("timestamp")
     return frame.groupby(["domain", "channel"], as_index=False).tail(1).reset_index(drop=True)
+
+
+def load_telemetry_freshness(
+    *,
+    station_id: str,
+    cfg: dict | None = None,
+) -> dict[str, pd.Timestamp]:
+    """Latest sample time per telemetry domain for a station."""
+    ensure_telemetry_table(cfg)
+    with connect(cfg) as conn:
+        frame = pd.read_sql_query(
+            """
+            SELECT domain, MAX(timestamp) AS last_timestamp
+            FROM telemetry
+            WHERE station_id = ?
+            GROUP BY domain
+            """,
+            conn,
+            params=[str(station_id)],
+        )
+    if frame.empty:
+        return {}
+    out: dict[str, pd.Timestamp] = {}
+    for _, row in frame.iterrows():
+        ts = pd.to_datetime(row["last_timestamp"], utc=True)
+        if pd.isna(ts):
+            continue
+        out[str(row["domain"])] = ts
+    return out
