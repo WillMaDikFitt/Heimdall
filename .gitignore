@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.python-version
+
+# Data (generated)
+data/*.db
+data/*.sqlite
+data/reference/
+data/raw/
+data/calibrated/
+data/forecast_archive/
+data/logs/
+data/hub_refresh_status.json
+*.parquet
+!data/.gitkeep
+
+# Jupyter
+.ipynb_checkpoints/
+
+# OS / IDE
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.swp

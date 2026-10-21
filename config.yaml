@@ -1,0 +1,165 @@
+product:
+  name: Heimdall
+  tagline: Sensor data hub for INDRA and ISSA
+station:
+  id: WS-INDRA
+  name: INDRA Weather Station
+  site: INDRA Hydro Project Dam
+  district: West Jaintia Hills, Meghalaya
+  latitude: 25.26305
+  longitude: 92.20109
+  timezone: Asia/Kolkata
+  area_radius_km: 12
+hub:
+  default: indra
+  ui:
+    data_window: 7 days
+    show_calibrated: true
+    show_reference: true
+    show_raw: false
+    despike: true
+    color_theme: graphite
+    auto_refresh_minutes: 0
+    skill:
+      day_mae_good: 3.0
+      day_mae_fair: 6.0
+      csi_target: 0.5
+      confidence_mae_good: 1.5
+      confidence_mae_fair: 2.5
+      spread_steady: 1.0
+      spread_mixed: 2.0
+  projects:
+    indra:
+      kind: dam
+      label: INDRA
+      blurb: Weather, water level, velocity, seepage, and CCTV
+      domains:
+      - weather
+      - hydro
+      - seepage
+      - cctv
+    issa:
+      kind: plantation
+      label: ISSA
+      blurb: Weather and soil NPK (moisture, EC, pH, N, P, K)
+      domains:
+      - weather
+      - soil
+      station:
+        id: WS-ISSA
+        name: ISSA Weather Station
+        site: ISSA plantation microclimate
+        district: West Jaintia Hills, Meghalaya
+        latitude: 25.32303
+        longitude: 92.01229
+        timezone: Asia/Kolkata
+        area_radius_km: 6.0
+sampling:
+  interval_minutes: 5
+open_meteo:
+  historical_days: 90
+  archive_lag_days: 3
+  cache_dir: data/reference
+storage:
+  sqlite_path: data/heimdall.db
+calibration:
+  resample_minutes: 60
+  iqr_multiplier: 1.5
+  holdout_fraction: 0.3
+validation:
+  nasa_power_days: 365
+  imd_grid_lat: 25.25
+  imd_grid_lon: 92.25
+forecast:
+  operational_days: 7
+  cache_minutes: 30
+  train_days: 3
+  forecast_days: 3
+  also_full_history: true
+  walkforward_step_hours: 24
+  horizons:
+  - 6
+  - 24
+  - 72
+  bias_window_days: 14
+  verify_min_age_hours: 48
+  channels:
+  - temperature_c
+  - humidity_pct
+  - pressure_hpa
+  - rainfall_mm
+  ensemble_members:
+  - met_norway
+  - gfs
+  - ecmwf
+simulation:
+  seed: 42
+  days: 14
+  spike_probability: 0.01
+  missing_probability: 0.02
+  spike_magnitude:
+    temperature_c: 8.0
+    humidity_pct: 25.0
+    pressure_hpa: 12.0
+    rainfall_mm: 15.0
+    wind_speed_ms: 8.0
+    wind_direction_deg: 90.0
+  noise_std:
+    temperature_c: 0.35
+    humidity_pct: 2.5
+    pressure_hpa: 0.6
+    rainfall_mm: 0.15
+    wind_speed_ms: 0.4
+    wind_direction_deg: 8.0
+  bias:
+    temperature_c: 1.6
+    humidity_pct: -4.0
+    pressure_hpa: 2.2
+    rainfall_mm: 0.05
+    wind_speed_ms: 0.3
+    wind_direction_deg: 12.0
+  scale:
+    temperature_c: 1.03
+    humidity_pct: 0.97
+    pressure_hpa: 1.001
+    rainfall_mm: 1.08
+    wind_speed_ms: 1.05
+    wind_direction_deg: 1.0
+  drift_per_day:
+    temperature_c: 0.04
+    humidity_pct: -0.15
+    pressure_hpa: 0.02
+    rainfall_mm: 0.0
+    wind_speed_ms: 0.02
+    wind_direction_deg: 0.3
+channels:
+  temperature_c:
+    label: Temperature
+    reference_var: temperature_2m
+    unit: °C
+    drift_alert_threshold: 2.0
+  humidity_pct:
+    label: Humidity
+    reference_var: relative_humidity_2m
+    unit: '%'
+    drift_alert_threshold: 8.0
+  pressure_hpa:
+    label: Pressure
+    reference_var: surface_pressure
+    unit: hPa
+    drift_alert_threshold: 3.0
+  rainfall_mm:
+    label: Rainfall
+    reference_var: precipitation
+    unit: mm
+    drift_alert_threshold: 2.0
+  wind_speed_ms:
+    label: Wind speed
+    reference_var: wind_speed_10m
+    unit: m/s
+    drift_alert_threshold: 1.5
+  wind_direction_deg:
+    label: Wind direction
+    reference_var: wind_direction_10m
+    unit: deg
+    drift_alert_threshold: 30.0
