@@ -33,13 +33,26 @@ jobs:
           pip install -r requirements.txt
 
       - name: Seed simulated sensors (weather + domains)
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
         run: python scripts/run_heimdall_simulate.py
 
       - name: Run hub analysis refresh
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
         run: python scripts/run_refresh_hub.py
 
-      - name: Commit refreshed database for Streamlit Cloud
+      - name: Commit local DB fallback (only when Turso secrets are missing)
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
         run: |
+          if [ -n "$TURSO_DATABASE_URL" ] && [ -n "$TURSO_AUTH_TOKEN" ]; then
+            echo "Using Turso remote DB — skipping git DB commit."
+            exit 0
+          fi
           git config user.name "heimdall-bot"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -f data/heimdall.db data/hub_refresh_status.json

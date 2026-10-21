@@ -55,18 +55,40 @@ python scripts/run_refresh_hub.py
 - `data/heimdall.db` — active database
 - `data/weather.db` — optional backup of the older weather-only DB
 
-## Streamlit Community Cloud
+## Database (Turso free, recommended)
 
-The live app reads `data/heimdall.db`. That file is tracked in git so Cloud has the same data as this repo.
+Heimdall uses SQLite locally by default (`data/heimdall.db`).
+
+For Streamlit Cloud, use a free **Turso** database (hosted SQLite — same schema):
+
+1. Create a free account at [turso.tech](https://turso.tech) (no card required)
+2. Create a database, e.g. `heimdall`
+3. Copy URL + token:
+   ```bash
+   turso db show --url heimdall
+   turso db tokens create heimdall
+   ```
+4. Put them in:
+   - **Streamlit Cloud** → App settings → Secrets (see `.streamlit/secrets.toml.example`)
+   - **GitHub** → Settings → Secrets and variables → Actions  
+     `TURSO_DATABASE_URL`, `TURSO_AUTH_TOKEN`
+5. Upload your current local DB once:
+   ```bash
+   set TURSO_DATABASE_URL=...
+   set TURSO_AUTH_TOKEN=...
+   python scripts/push_local_db_to_turso.py
+   ```
+
+When those secrets exist, the hub and the daily Action read/write Turso instead of the git file.
+
+## Daily refresh
 
 A GitHub Action (`.github/workflows/daily_hub_refresh.yml`) runs every day at **02:00 IST**:
 1. Reseed simulated sensors
 2. Run full hub analysis (`run_refresh_hub.py`)
-3. Commit updated `data/heimdall.db` (Streamlit redeploys automatically)
+3. Writes into **Turso** when secrets are set (otherwise falls back to committing `data/heimdall.db`)
 
-You can also trigger it manually: GitHub → Actions → **Daily hub refresh** → Run workflow.
-
-Clicking **Run analysis** inside Streamlit only updates that session’s temporary disk — prefer the daily Action (or run the script locally and push) for lasting updates.
+Manual run: GitHub → Actions → **Daily hub refresh** → Run workflow.
 
 ## Notes
 

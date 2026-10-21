@@ -1,16 +1,13 @@
-"""SQLite persistence for raw sensor, reference, calibrated, and coefficient rows."""
+"""SQLite / Turso persistence for raw sensor, reference, calibrated, and coefficient rows."""
 
 from __future__ import annotations
 
-import sqlite3
-from contextlib import contextmanager
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Iterator
+from typing import Any
 
 import pandas as pd
 
-from src.config import load_config
+from src.db import connect, db_path
 from src.schema import CHANNEL_NAMES, SensorPayload
 
 READINGS_COLUMNS = [
@@ -27,23 +24,14 @@ READINGS_COLUMNS = [
     "source",
 ]
 
-
-def db_path(cfg: dict | None = None) -> Path:
-    cfg = cfg or load_config()
-    path = Path(cfg["storage"]["sqlite_path"])
-    path.parent.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-@contextmanager
-def connect(cfg: dict | None = None) -> Iterator[sqlite3.Connection]:
-    conn = sqlite3.connect(db_path(cfg))
-    conn.row_factory = sqlite3.Row
-    try:
-        yield conn
-        conn.commit()
-    finally:
-        conn.close()
+__all__ = [
+    "READINGS_COLUMNS",
+    "CHANNEL_NAMES",
+    "SensorPayload",
+    "connect",
+    "db_path",
+    "init_db",
+]
 
 
 def init_db(cfg: dict | None = None) -> None:
@@ -226,7 +214,7 @@ def init_db(cfg: dict | None = None) -> None:
         _migrate_schema(conn)
 
 
-def _migrate_schema(conn: sqlite3.Connection) -> None:
+def _migrate_schema(conn: Any) -> None:
     """Add columns/tables introduced after initial schema without breaking old DBs."""
     cols = {row[1] for row in conn.execute("PRAGMA table_info(calibration_coefficients)")}
     for col, typedef in [
@@ -296,7 +284,7 @@ def _migrate_schema(conn: sqlite3.Connection) -> None:
     )
 
 
-def _migrate_ensemble_station_id(conn: sqlite3.Connection) -> None:
+def _migrate_ensemble_station_id(conn: Any) -> None:
     tables = {
         row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
@@ -339,7 +327,7 @@ def _migrate_ensemble_station_id(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE ensemble_forecast_hourly_v2 RENAME TO ensemble_forecast_hourly")
 
 
-def _migrate_nwp_station_id(conn: sqlite3.Connection) -> None:
+def _migrate_nwp_station_id(conn: Any) -> None:
     tables = {
         row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
     }
@@ -377,7 +365,7 @@ def _migrate_nwp_station_id(conn: sqlite3.Connection) -> None:
     conn.execute("ALTER TABLE nwp_member_hourly_v2 RENAME TO nwp_member_hourly")
 
 
-def _migrate_reference_station_id(conn: sqlite3.Connection) -> None:
+def _migrate_reference_station_id(conn: Any) -> None:
     """Older databases stored one Open-Meteo series; tag it as the dam station."""
     tables = {
         row[0]

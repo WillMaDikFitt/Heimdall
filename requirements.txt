@@ -11,3 +11,4 @@ plotly>=5.22
 matplotlib>=3.8
 python-dateutil>=2.9
 netcdf4>=1.7
+libsql>=0.1.0
