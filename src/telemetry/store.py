@@ -76,8 +76,9 @@ def replace_telemetry_domain(
                 }
             )
         if payload:
-            conn.executemany(
-                """
+            # Batch inserts — Turso/libSQL rejects giant single executemany calls.
+            batch_size = 200
+            sql = """
                 INSERT INTO telemetry (
                     station_id, timestamp, domain, channel, value, unit,
                     quality_flag, source, meta_json
@@ -85,9 +86,9 @@ def replace_telemetry_domain(
                     :station_id, :timestamp, :domain, :channel, :value, :unit,
                     :quality_flag, :source, :meta_json
                 )
-                """,
-                payload,
-            )
+                """
+            for start in range(0, len(payload), batch_size):
+                conn.executemany(sql, payload[start : start + batch_size])
     return len(payload)
 
 

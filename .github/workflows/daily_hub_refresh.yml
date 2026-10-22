@@ -5,6 +5,11 @@ on:
     # 02:00 IST (20:30 UTC previous calendar day)
     - cron: "30 20 * * *"
   workflow_dispatch:
+    inputs:
+      reseed_sensors:
+        description: "Also reseed simulated sensors/telemetry"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -32,7 +37,21 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Seed simulated sensors (weather + domains)
+      - name: Check database target
+        env:
+          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
+          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
+        run: |
+          if [ -n "$TURSO_DATABASE_URL" ] && [ -n "$TURSO_AUTH_TOKEN" ]; then
+            echo "Database target: Turso"
+          else
+            echo "::error::Missing GitHub Actions secrets TURSO_DATABASE_URL and/or TURSO_AUTH_TOKEN."
+            echo "Add them under Settings → Secrets and variables → Actions (same values as .env)."
+            exit 1
+          fi
+
+      - name: Seed simulated sensors (optional / first-time)
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.reseed_sensors }}
         env:
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
@@ -43,22 +62,3 @@ jobs:
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
         run: python scripts/run_refresh_hub.py
-
-      - name: Commit local DB fallback (only when Turso secrets are missing)
-        env:
-          TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
-          TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
-        run: |
-          if [ -n "$TURSO_DATABASE_URL" ] && [ -n "$TURSO_AUTH_TOKEN" ]; then
-            echo "Using Turso remote DB — skipping git DB commit."
-            exit 0
-          fi
-          git config user.name "heimdall-bot"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add -f data/heimdall.db data/hub_refresh_status.json
-          if git diff --staged --quiet; then
-            echo "No database changes to commit."
-            exit 0
-          fi
-          git commit -m "Daily hub refresh $(date -u +%Y-%m-%dT%H:%MZ)"
-          git push

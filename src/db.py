@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import os
+import re
 import sqlite3
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterator
 
 from src.config import load_config
+
+_NAMED_PARAM = re.compile(r":([A-Za-z_][A-Za-z0-9_]*)")
 
 
 def db_path(cfg: dict | None = None) -> Path:
@@ -103,6 +106,19 @@ class _IterableCursor:
             close()
 
 
+def _to_qmark(sql: str, parameters: Any) -> tuple[str, Any]:
+    """Convert sqlite3-style :name dict params to libsql-compatible qmark tuples."""
+    if not isinstance(parameters, dict):
+        return sql, parameters
+    values: list[Any] = []
+
+    def repl(match: re.Match[str]) -> str:
+        values.append(parameters[match.group(1)])
+        return "?"
+
+    return _NAMED_PARAM.sub(repl, sql), values
+
+
 class _CompatConnection:
     """Thin wrapper so remote libsql matches sqlite3 connection habits."""
 
@@ -113,11 +129,21 @@ class _CompatConnection:
         if parameters in ((), [], None):
             cursor = self._conn.execute(sql)
         else:
+            sql, parameters = _to_qmark(sql, parameters)
             cursor = self._conn.execute(sql, parameters)
         return _IterableCursor(cursor)
 
     def executemany(self, sql: str, seq_of_parameters: Any) -> _IterableCursor:
-        cursor = self._conn.executemany(sql, seq_of_parameters)
+        seq = list(seq_of_parameters or [])
+        if seq and isinstance(seq[0], dict):
+            converted: list[Any] = []
+            qsql = sql
+            for item in seq:
+                qsql, values = _to_qmark(sql, item)
+                converted.append(values)
+            cursor = self._conn.executemany(qsql, converted)
+        else:
+            cursor = self._conn.executemany(sql, seq)
         return _IterableCursor(cursor)
 
     def executescript(self, script: str) -> Any:
