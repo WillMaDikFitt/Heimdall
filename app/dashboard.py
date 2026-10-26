@@ -2019,7 +2019,10 @@ def _render_progress_page(
     history = _ensemble_rain_history(forecast_verification)
     if history.empty:
         _page_intro("Progress", f"How well {label} forecasts matched real weather.")
-        st.info("No scored outlooks yet. They appear about 48 hours after Run analysis.")
+        st.info(
+            f"No scored rain outlooks for {label} yet. "
+            "Progress needs a Run analysis, then about 48 hours for that outlook to mature and be scored."
+        )
         return
 
     issued = pd.to_datetime(history["issued_at"], utc=True)

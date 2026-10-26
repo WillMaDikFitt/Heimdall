@@ -832,6 +832,49 @@ def replace_forecast_verification_scores(scores: list[dict], cfg: dict | None = 
             )
 
 
+# Renamed project station IDs (keep Progress history after rebrand).
+_STATION_ALIASES = {
+    "WS-INDRA": ("WS-INDRA", "WS-LESHKA"),
+    "WS-ISSA": ("WS-ISSA", "WS-CARDAMOM"),
+}
+
+
+def _station_id_aliases(station_id: str) -> tuple[str, ...]:
+    sid = str(station_id)
+    return _STATION_ALIASES.get(sid, (sid,))
+
+
+def remap_legacy_station_ids(cfg: dict | None = None) -> dict[str, int]:
+    """Rewrite LESHKA/CARDAMOM rows to INDRA/ISSA across hub tables."""
+    init_db(cfg)
+    mapping = (("WS-LESHKA", "WS-INDRA"), ("WS-CARDAMOM", "WS-ISSA"))
+    tables = (
+        "forecast_verification_scores",
+        "ensemble_forecast_hourly",
+        "nwp_member_hourly",
+        "reference_readings",
+        "readings",
+        "calibrated_readings",
+        "calibration_coefficients",
+        "telemetry",
+    )
+    updated: dict[str, int] = {}
+    with connect(cfg) as conn:
+        for old, new in mapping:
+            for table in tables:
+                try:
+                    cur = conn.execute(
+                        f"UPDATE {table} SET station_id = ? WHERE station_id = ?",
+                        (new, old),
+                    )
+                    n = int(getattr(cur, "rowcount", 0) or 0)
+                    if n:
+                        updated[f"{table}:{old}->{new}"] = n
+                except Exception:
+                    continue
+    return updated
+
+
 def load_forecast_verification_scores(
     cfg: dict | None = None,
     station_id: str | None = None,
@@ -840,12 +883,13 @@ def load_forecast_verification_scores(
     cfg = cfg or load_config()
     with connect(cfg) as conn:
         if station_id:
-            # Only exact station match — do not pull NULL/legacy rows into other sites.
+            aliases = _station_id_aliases(str(station_id))
+            placeholders = ", ".join("?" for _ in aliases)
             return pd.read_sql_query(
-                "SELECT * FROM forecast_verification_scores WHERE station_id = ? "
+                f"SELECT * FROM forecast_verification_scores WHERE station_id IN ({placeholders}) "
                 "ORDER BY channel, mae",
                 conn,
-                params=(str(station_id),),
+                params=aliases,
             )
         return pd.read_sql_query(
             "SELECT * FROM forecast_verification_scores ORDER BY channel, mae", conn
