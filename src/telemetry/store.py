@@ -7,6 +7,7 @@ from typing import Any
 
 import pandas as pd
 
+from src.db import using_remote_db
 from src.ingestion.store import connect, init_db
 
 
@@ -75,18 +76,50 @@ def replace_telemetry_domain(
                     "meta_json": meta,
                 }
             )
-        if payload:
-            # Batch inserts — Turso/libSQL rejects giant single executemany calls.
-            batch_size = 200
-            sql = """
-                INSERT INTO telemetry (
-                    station_id, timestamp, domain, channel, value, unit,
-                    quality_flag, source, meta_json
-                ) VALUES (
-                    :station_id, :timestamp, :domain, :channel, :value, :unit,
-                    :quality_flag, :source, :meta_json
+        if not payload:
+            return 0
+        cols = [
+            "station_id",
+            "timestamp",
+            "domain",
+            "channel",
+            "value",
+            "unit",
+            "quality_flag",
+            "source",
+            "meta_json",
+        ]
+        if using_remote_db():
+            # Multi-row INSERT is much faster over Turso HTTP than executemany.
+            batch_size = 80
+
+            def lit(value: Any) -> str:
+                if value is None:
+                    return "NULL"
+                if isinstance(value, bool):
+                    return "1" if value else "0"
+                if isinstance(value, float):
+                    if value != value:  # NaN
+                        return "NULL"
+                    return repr(float(value))
+                if isinstance(value, int):
+                    return str(int(value))
+                return "'" + str(value).replace("'", "''") + "'"
+
+            for start in range(0, len(payload), batch_size):
+                chunk = payload[start : start + batch_size]
+                values = ", ".join(
+                    "(" + ", ".join(lit(row[c]) for c in cols) + ")" for row in chunk
                 )
+                conn.execute(
+                    f"INSERT INTO telemetry ({', '.join(cols)}) VALUES {values}"
+                )
+        else:
+            sql = f"""
+                INSERT INTO telemetry ({', '.join(cols)})
+                VALUES ({', '.join(':' + c for c in cols)})
                 """
+            batch_size = 500
             for start in range(0, len(payload), batch_size):
                 conn.executemany(sql, payload[start : start + batch_size])
     return len(payload)

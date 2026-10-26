@@ -7,6 +7,7 @@ from typing import Any
 
 import pandas as pd
 
+from src.config import load_config
 from src.db import connect, db_path
 from src.schema import CHANNEL_NAMES, SensorPayload
 
@@ -879,7 +880,9 @@ def replace_ensemble_forecast(
     for col in cols:
         if col not in df.columns:
             df[col] = None
-    records = df[cols].to_dict(orient="records")
+    # Turso rejects NaN floats; convert to SQL NULL.
+    clean = df[cols].astype(object).where(pd.notnull(df[cols]), None)
+    records = clean.to_dict(orient="records")
     with connect(cfg) as conn:
         conn.execute("DELETE FROM ensemble_forecast_hourly WHERE station_id = ?", (sid,))
         conn.executemany(
@@ -932,9 +935,10 @@ def replace_nwp_members(
             for col in cols:
                 if col not in df.columns:
                     df[col] = None
+            clean = df[cols].astype(object).where(pd.notnull(df[cols]), None)
             conn.executemany(
                 f"INSERT INTO nwp_member_hourly ({', '.join(cols)}) VALUES ({', '.join(':' + c for c in cols)})",
-                df[cols].to_dict(orient="records"),
+                clean.to_dict(orient="records"),
             )
             total += len(df)
     return total

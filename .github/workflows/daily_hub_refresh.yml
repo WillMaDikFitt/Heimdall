@@ -21,7 +21,8 @@ concurrency:
 jobs:
   refresh:
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # Ensemble + verify for two projects regularly exceeds 45 minutes on GitHub runners.
+    timeout-minutes: 90
     steps:
       - name: Checkout
         uses: actions/checkout@v4
