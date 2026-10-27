@@ -113,7 +113,21 @@ def _projects(cfg: dict) -> dict[str, dict]:
     return hub_projects(cfg)
 
 
-@st.cache_data(ttl=300, show_spinner="Loading hub data…")
+def _st_html(body: str, *, allow_js: bool = False) -> None:
+    """Inject HTML in a Streamlit-version-safe way (Cloud may lag local installs)."""
+    if allow_js:
+        try:
+            st.html(body, unsafe_allow_javascript=True)
+            return
+        except TypeError:
+            pass
+    try:
+        st.html(body)
+    except TypeError:
+        st.markdown(body, unsafe_allow_html=True)
+
+
+@st.cache_data(ttl=300, show_spinner=True)
 def _load(project_id: str = "indra") -> dict[str, object]:
     """Lean hub payload — avoid unused Turso tables and extra Open-Meteo calls."""
     cfg = load_config()
@@ -814,9 +828,9 @@ def _render_settings_page(cfg: dict, projects: dict[str, dict]) -> None:
     with right:
         st.caption("Save, then press Run analysis if you changed forecast models or days ahead.")
 
-    st.html(
+    _st_html(
         theme.paint_streamlit_controls(theme.theme_tokens(color_theme)["accent"]),
-        unsafe_allow_javascript=True,
+        allow_js=True,
     )
 
     if save:
@@ -1449,10 +1463,13 @@ def _forecast_overview(
     recent_rain_kicker = "Recent 3-day rain · sensor" if station_is_live else "Recent 3-day rain"
 
     local_time = pd.Timestamp(current["timestamp"]).tz_convert(tz)
-    current_temp = float(current["temperature_c"])
+    temp_now = pd.to_numeric(current.get("temperature_c"), errors="coerce")
+    current_temp = float(temp_now) if pd.notna(temp_now) else 0.0
     humidity = current.get("humidity_pct")
     humidity_label = _num(humidity, 0) if humidity is not None else "—"
     pressure_now = current.get("pressure_hpa")
+    wind_raw = pd.to_numeric(current.get("wind_speed_ms"), errors="coerce")
+    wind_now = float(wind_raw) if pd.notna(wind_raw) else 0.0
 
     fourth = (
         theme.stat_card(
@@ -1465,7 +1482,7 @@ def _forecast_overview(
         if kind == "plantation"
         else theme.stat_card(
             "Wind",
-            f"{float(current['wind_speed_ms']):.1f}",
+            f"{wind_now:.1f}",
             "m/s",
             f"Peak {wind_max:.1f}",
             "wind",
@@ -1587,7 +1604,8 @@ def _forecast_overview(
         )
     st.markdown(f'<div class="days">{"".join(day_cards)}</div>', unsafe_allow_html=True)
 
-    fetched_local = pd.Timestamp(bundle.fetched_at).tz_convert(tz)
+    fetched_ts = _as_utc_ts(bundle.fetched_at) or pd.Timestamp.now(tz="UTC")
+    fetched_local = fetched_ts.tz_convert(tz)
     source_name = _friendly_forecast_source(str(bundle.source))
     st.caption(
         f"{source_name} · {fetched_local.strftime('%d %b %H:%M IST')} · {source_note} "
@@ -2381,7 +2399,7 @@ def main() -> None:
     boot_theme = _active_theme_id(base_cfg)
     st.markdown(theme.stylesheet(boot_theme), unsafe_allow_html=True)
     _accent = theme.theme_tokens(boot_theme)["accent"]
-    st.html(theme.paint_streamlit_controls(_accent), unsafe_allow_javascript=True)
+    _st_html(theme.paint_streamlit_controls(_accent), allow_js=True)
     try:
         from src.config import _sync_streamlit_primary
 
@@ -2547,12 +2565,14 @@ def main() -> None:
             else pd.Timestamp.now("UTC")
         )
         source = str(hourly["source"].iloc[0]) if "source" in hourly.columns else "NWP ensemble"
+        fetched_ts = _as_utc_ts(fetched) or pd.Timestamp.now(tz="UTC")
         display_forecast = ForecastBundle(
-            hourly, daily, pd.Timestamp(fetched).to_pydatetime(), source
+            hourly, daily, fetched_ts.to_pydatetime(), source
         )
-        spread_col = pd.to_numeric(hourly.get("temperature_c_spread"), errors="coerce")
-        if spread_col is not None and not spread_col.dropna().empty:
-            ensemble_spread = float(spread_col.dropna().mean())
+        if "temperature_c_spread" in hourly.columns:
+            spread_col = pd.to_numeric(hourly["temperature_c_spread"], errors="coerce")
+            if not spread_col.dropna().empty:
+                ensemble_spread = float(spread_col.dropna().mean())
 
     if readings.empty and reference.empty and display_forecast is None:
         st.info(

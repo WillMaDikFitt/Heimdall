@@ -78,7 +78,7 @@ def using_remote_db() -> bool:
 
 
 class _IterableCursor:
-    """Make libsql cursors behave like sqlite3 (iterable + fetch*)."""
+    """Make libsql cursors behave like sqlite3 (iterable + fetch* + execute)."""
 
     def __init__(self, cursor: Any) -> None:
         self._cursor = cursor
@@ -93,6 +93,20 @@ class _IterableCursor:
 
     def __iter__(self):
         return iter(self._materialize())
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._cursor, name)
+
+    def execute(self, sql: str, parameters: Any = ()) -> "_IterableCursor":
+        """Support pandas paths that do conn.cursor().execute(...)."""
+        self._rows = None
+        self._index = 0
+        if parameters in ((), [], None):
+            self._cursor.execute(sql)
+        else:
+            sql, parameters = _to_qmark(sql, parameters)
+            self._cursor.execute(sql, parameters)
+        return self
 
     def fetchone(self) -> Any:
         rows = self._materialize()
@@ -213,7 +227,8 @@ class _CompatConnection:
         self._conn.close()
 
     def cursor(self) -> Any:
-        return self._conn.cursor()
+        raw = self._conn.cursor()
+        return _IterableCursor(raw) if raw is not None else raw
 
 
 def _open_connection(cfg: dict | None = None) -> Any:
