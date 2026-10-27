@@ -113,52 +113,59 @@ def _projects(cfg: dict) -> dict[str, dict]:
     return hub_projects(cfg)
 
 
-@st.cache_data(ttl=30)
+@st.cache_data(ttl=300, show_spinner="Loading hub data…")
 def _load(project_id: str = "indra") -> dict[str, object]:
-    load_config.cache_clear()
+    """Lean hub payload — avoid unused Turso tables and extra Open-Meteo calls."""
     cfg = load_config()
     pid = resolve_project_id(cfg, project_id)
     project = _projects(cfg)[pid]
     runtime_cfg = {**cfg, "station": project["station"]}
+    station_id = str(project["station"]["id"])
+    empty = pd.DataFrame()
+
+    ensemble = load_ensemble_forecast(cfg=cfg, station_id=station_id)
     forecast_bundle: ForecastBundle | None = None
     forecast_error = ""
-    try:
-        forecast_bundle = fetch_forecast(
-            cfg=runtime_cfg,
-            forecast_days=int(cfg["forecast"].get("operational_days", 7)),
-            cache_minutes=int(cfg["forecast"].get("cache_minutes", 30)),
-        )
-    except Exception as exc:  # keep diagnostics available during network outages
-        forecast_error = str(exc)
+    # Prefer stored ensemble; only hit Open-Meteo when ensemble is missing.
+    if ensemble.empty:
+        try:
+            forecast_bundle = fetch_forecast(
+                cfg=runtime_cfg,
+                forecast_days=int(cfg["forecast"].get("operational_days", 7)),
+                cache_minutes=int(cfg["forecast"].get("cache_minutes", 30)),
+            )
+        except Exception as exc:
+            forecast_error = str(exc)
 
-    station_id = str(project["station"]["id"])
-    dam_only = str(project["kind"]) == "dam"
-    empty = pd.DataFrame()
-    ensemble = load_ensemble_forecast(cfg=cfg, station_id=station_id)
-    nwp_members = load_nwp_members(cfg=cfg, station_id=station_id)
-    forecast_verification = load_forecast_verification_scores(cfg=cfg, station_id=station_id)
-    scores = load_forecast_scores(cfg=cfg) if dam_only else empty
-    walkforward = load_walkforward_scores(cfg=cfg) if dam_only else empty
-    predictions = load_forecast_predictions(cfg=cfg) if dam_only else empty
     return {
         "cfg": runtime_cfg,
         "project": project,
-        "readings": load_readings(station_id, cfg=cfg),
-        "reference": load_reference(cfg=cfg, station_id=station_id),
-        "calibrated": load_calibrated(cfg=cfg, station_id=station_id),
+        "readings": load_readings(station_id, cfg=cfg, days=14),
+        "reference": load_reference(cfg=cfg, station_id=station_id, days=14),
+        "calibrated": empty,
         "coeffs": load_latest_coefficients(cfg=cfg, station_id=station_id),
-        "scores": scores,
-        "walkforward": walkforward,
-        "predictions": predictions,
+        "scores": empty,
+        "walkforward": empty,
+        "predictions": empty,
         "operational_forecast": forecast_bundle,
         "ensemble": ensemble,
-        "nwp_members": nwp_members,
-        "power": load_power_readings(cfg=cfg) if dam_only else empty,
-        "imd": load_imd_daily_rain(cfg=cfg) if dam_only else empty,
-        "source_validation": load_source_validation_scores(cfg=cfg) if dam_only else empty,
-        "forecast_verification": forecast_verification,
+        "nwp_members": empty,
+        "power": empty,
+        "imd": empty,
+        "source_validation": empty,
+        "forecast_verification": load_forecast_verification_scores(
+            cfg=cfg, station_id=station_id
+        ),
         "forecast_error": forecast_error,
     }
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_nwp_members(project_id: str) -> pd.DataFrame:
+    cfg = load_config()
+    pid = resolve_project_id(cfg, project_id)
+    station_id = str(_projects(cfg)[pid]["station"]["id"])
+    return load_nwp_members(cfg=cfg, station_id=station_id)
 
 
 def _label(cfg: dict, channel: str) -> str:
@@ -876,9 +883,8 @@ def _section_nav(
                     type="primary" if active else "secondary",
                     width="stretch",
                 ):
-                    if name != current:
-                        st.session_state[key] = name
-                        st.rerun()
+                    st.session_state[key] = name
+    # No st.rerun() — returning the new tab avoids a double full-script reload.
     return str(st.session_state[key])
 
 
@@ -2643,6 +2649,7 @@ def main() -> None:
                 st.caption(forecast_error)
         else:
             daily = _with_wet_hours(display_forecast.daily, display_forecast.hourly, tz)
+            nwp_members = _load_nwp_members(project_id)
             payload = build_forecast_payload(
                 daily=daily,
                 hourly=display_forecast.hourly,

@@ -131,6 +131,7 @@ def load_telemetry(
     domain: str | None = None,
     channel: str | None = None,
     cfg: dict | None = None,
+    days: int | None = 14,
 ) -> pd.DataFrame:
     ensure_telemetry_table(cfg)
     clauses = ["station_id = ?"]
@@ -141,6 +142,12 @@ def load_telemetry(
     if channel:
         clauses.append("channel = ?")
         params.append(str(channel))
+    if days is not None and days > 0:
+        since = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=int(days))).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        clauses.append("timestamp >= ?")
+        params.append(since)
     where = " AND ".join(clauses)
     with connect(cfg) as conn:
         frame = pd.read_sql_query(

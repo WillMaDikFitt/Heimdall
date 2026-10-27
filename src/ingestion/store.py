@@ -35,7 +35,14 @@ __all__ = [
 ]
 
 
-def init_db(cfg: dict | None = None) -> None:
+_SCHEMA_READY = False
+
+
+def init_db(cfg: dict | None = None, *, force: bool = False) -> None:
+    """Create/migrate schema. Skips repeat work in the same process (big Turso win)."""
+    global _SCHEMA_READY
+    if _SCHEMA_READY and not force:
+        return
     with connect(cfg) as conn:
         conn.executescript(
             """
@@ -213,6 +220,7 @@ def init_db(cfg: dict | None = None) -> None:
             """
         )
         _migrate_schema(conn)
+    _SCHEMA_READY = True
 
 
 def _migrate_schema(conn: Any) -> None:
@@ -548,32 +556,60 @@ def insert_coefficients(rows: list[dict], cfg: dict | None = None) -> None:
         )
 
 
-def load_readings(station_id: str | None = None, cfg: dict | None = None) -> pd.DataFrame:
+def load_readings(
+    station_id: str | None = None,
+    cfg: dict | None = None,
+    *,
+    days: int | None = None,
+) -> pd.DataFrame:
     init_db(cfg)
-    query = "SELECT * FROM readings"
-    params: tuple = ()
+    clauses: list[str] = []
+    params: list[Any] = []
     if station_id:
-        query += " WHERE station_id = ?"
-        params = (station_id,)
+        clauses.append("station_id = ?")
+        params.append(str(station_id))
+    if days is not None and days > 0:
+        since = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=int(days))).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        clauses.append("timestamp >= ?")
+        params.append(since)
+    query = "SELECT * FROM readings"
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
     query += " ORDER BY timestamp"
     with connect(cfg) as conn:
-        df = pd.read_sql_query(query, conn, params=params)
+        df = pd.read_sql_query(query, conn, params=tuple(params))
     if df.empty:
         return df
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
     return df
 
 
-def load_reference(cfg: dict | None = None, station_id: str | None = None) -> pd.DataFrame:
+def load_reference(
+    cfg: dict | None = None,
+    station_id: str | None = None,
+    *,
+    days: int | None = None,
+) -> pd.DataFrame:
     init_db(cfg)
-    query = "SELECT * FROM reference_readings"
-    params: tuple = ()
+    clauses: list[str] = []
+    params: list[Any] = []
     if station_id:
-        query += " WHERE station_id = ?"
-        params = (station_id,)
+        clauses.append("station_id = ?")
+        params.append(str(station_id))
+    if days is not None and days > 0:
+        since = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=int(days))).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
+        clauses.append("timestamp >= ?")
+        params.append(since)
+    query = "SELECT * FROM reference_readings"
+    if clauses:
+        query += " WHERE " + " AND ".join(clauses)
     query += " ORDER BY timestamp"
     with connect(cfg) as conn:
-        df = pd.read_sql_query(query, conn, params=params)
+        df = pd.read_sql_query(query, conn, params=tuple(params))
     if df.empty:
         return df
     df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True)
