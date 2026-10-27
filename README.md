@@ -90,6 +90,13 @@ A GitHub Action (`.github/workflows/daily_hub_refresh.yml`) runs every day at **
 
 Manual run: GitHub → Actions → **Daily hub refresh** → Run workflow.
 
+## Keep Streamlit awake (free)
+
+Streamlit Community Cloud sleeps after ~12 hours with no visitors.  
+`.github/workflows/keepalive_streamlit.yml` visits https://heimdall-eye.streamlit.app/ with Playwright every **6 hours** and clicks wake if needed.
+
+Manual run: GitHub → Actions → **Keep Streamlit awake** → Run workflow.
+
 ## Notes
 
 - Until hardware is installed, `run_heimdall_simulate.py` writes realistic synthetic series.
