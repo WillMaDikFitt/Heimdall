@@ -27,13 +27,20 @@ from src.telemetry.store import (
     load_telemetry_freshness,
     load_telemetry_latest,
 )
+from src.ingestion import store as _ingestion_store
 from src.ingestion.store import (
+    load_ensemble_forecast,
     load_forecast_verification_scores,
-    load_hub_snapshot,
     load_imd_daily_rain,
+    load_latest_coefficients,
     load_nwp_members,
     load_power_readings,
+    load_readings,
+    load_reference,
 )
+
+# Prefer batched loader; fall back if Cloud is still on an older store.py.
+_load_hub_snapshot = getattr(_ingestion_store, "load_hub_snapshot", None)
 from src.forecast.ensemble import ensemble_as_operational, ensemble_to_daily
 from src.reference.forecast import ForecastBundle, fetch_forecast, weather_label
 from src.schema import CHANNEL_NAMES
@@ -133,9 +140,38 @@ def _st_html(body: str, *, allow_js: bool = False) -> None:
         st.markdown(body, unsafe_allow_html=True)
 
 
-@st.cache_data(ttl=600, show_spinner="Loading…")
+def _hub_snapshot_fallback(station_id: str, cfg: dict, *, days: int = 14) -> dict[str, object]:
+    """Older store.py path — separate queries if load_hub_snapshot is missing."""
+    empty = pd.DataFrame()
+    readings = load_readings(station_id, cfg=cfg, days=days)
+    if readings.empty:
+        readings = load_readings(station_id, cfg=cfg, days=None)
+        if not readings.empty and "timestamp" in readings.columns:
+            readings = readings.sort_values("timestamp").tail(500).reset_index(drop=True)
+    try:
+        status = load_refresh_status(cfg)
+    except TypeError:
+        status = load_refresh_status()  # type: ignore[call-arg]
+    except Exception:
+        status = {}
+    try:
+        tel = load_telemetry_freshness(station_id=station_id, cfg=cfg)
+    except Exception:
+        tel = {}
+    return {
+        "ensemble": load_ensemble_forecast(cfg=cfg, station_id=station_id),
+        "readings": readings,
+        "reference": load_reference(cfg=cfg, station_id=station_id, days=days),
+        "coeffs": load_latest_coefficients(cfg=cfg, station_id=station_id),
+        "refresh_status": status if isinstance(status, dict) else {},
+        "telemetry_freshness": tel if isinstance(tel, dict) else {},
+        "calibrated": empty,
+    }
+
+
+@st.cache_data(ttl=600, show_spinner=True)
 def _load(project_id: str = "indra") -> dict[str, object]:
-    """Lean hub payload — one DB session, skip Progress scores until that tab opens."""
+    """Lean hub payload — one DB session when available; skip Progress scores until needed."""
     cfg = load_config()
     pid = resolve_project_id(cfg, project_id)
     project = _projects(cfg)[pid]
@@ -143,12 +179,16 @@ def _load(project_id: str = "indra") -> dict[str, object]:
     station_id = str(project["station"]["id"])
     empty = pd.DataFrame()
 
-    snap = load_hub_snapshot(station_id, cfg=cfg, days=14)
+    if callable(_load_hub_snapshot):
+        snap = _load_hub_snapshot(station_id, cfg=cfg, days=14)
+    else:
+        snap = _hub_snapshot_fallback(station_id, cfg, days=14)
+
     ensemble = snap["ensemble"]
     forecast_bundle: ForecastBundle | None = None
     forecast_error = ""
     # Prefer stored ensemble; only hit Open-Meteo when ensemble is missing.
-    if ensemble.empty:
+    if isinstance(ensemble, pd.DataFrame) and ensemble.empty:
         try:
             forecast_bundle = fetch_forecast(
                 cfg=runtime_cfg,
@@ -161,15 +201,15 @@ def _load(project_id: str = "indra") -> dict[str, object]:
     return {
         "cfg": runtime_cfg,
         "project": project,
-        "readings": snap["readings"],
-        "reference": snap["reference"],
+        "readings": snap.get("readings", empty),
+        "reference": snap.get("reference", empty),
         "calibrated": empty,
-        "coeffs": snap["coeffs"],
+        "coeffs": snap.get("coeffs", empty),
         "scores": empty,
         "walkforward": empty,
         "predictions": empty,
         "operational_forecast": forecast_bundle,
-        "ensemble": ensemble,
+        "ensemble": ensemble if isinstance(ensemble, pd.DataFrame) else empty,
         "nwp_members": empty,
         "power": empty,
         "imd": empty,

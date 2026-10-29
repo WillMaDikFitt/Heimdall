@@ -32,6 +32,7 @@ __all__ = [
     "connect",
     "db_path",
     "init_db",
+    "load_hub_snapshot",
 ]
 
 
