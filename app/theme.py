@@ -1154,6 +1154,10 @@ section[data-testid="stSidebar"] > div {
 .source-idle { color: var(--v-muted); background: rgba(160,174,192,.1); }
 .source-name { color: #fff; font-size: .95rem; font-weight: 700; }
 .source-copy { color: var(--v-muted); font-size: .75rem; margin-top: 4px; line-height: 1.4; }
+.source-api {
+  color: var(--v-faint); font-size: .62rem; margin-top: 8px; line-height: 1.35;
+  word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
 
 .source-line {
   color: var(--v-muted); font-size: .78rem; line-height: 1.5;

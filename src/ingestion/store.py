@@ -291,6 +291,16 @@ def _migrate_schema(conn: Any) -> None:
         "CREATE INDEX IF NOT EXISTS idx_telemetry_station_domain_ts "
         "ON telemetry(station_id, domain, timestamp)"
     )
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS hub_refresh_status (
+            id INTEGER PRIMARY KEY CHECK (id = 1),
+            payload_json TEXT NOT NULL,
+            finished_at TEXT,
+            ok INTEGER
+        )
+        """
+    )
 
 
 def _migrate_ensemble_station_id(conn: Any) -> None:

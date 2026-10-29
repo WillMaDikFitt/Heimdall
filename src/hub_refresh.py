@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from src.config import load_config
+from src.db import connect
 from src.hub import projects, runtime_config
 from src.ingestion.store import (
     init_db,
@@ -33,7 +34,22 @@ def _log(message: str, sink: LogFn | None) -> None:
         print(message, flush=True)
 
 
-def load_refresh_status() -> dict[str, Any]:
+def load_refresh_status(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Prefer Turso/shared DB status so Streamlit Cloud sees nightly Actions runs."""
+    try:
+        init_db(cfg)
+        with connect(cfg) as conn:
+            row = conn.execute(
+                "SELECT payload_json FROM hub_refresh_status WHERE id = 1"
+            ).fetchone()
+        if row is not None:
+            raw = row[0] if not isinstance(row, dict) else row.get("payload_json")
+            if raw:
+                data = json.loads(str(raw))
+                if isinstance(data, dict) and data:
+                    return data
+    except Exception:
+        pass
     if not STATUS_PATH.exists():
         return {}
     try:
@@ -42,9 +58,29 @@ def load_refresh_status() -> dict[str, Any]:
         return {}
 
 
-def save_refresh_status(payload: dict[str, Any]) -> Path:
+def save_refresh_status(payload: dict[str, Any], cfg: dict[str, Any] | None = None) -> Path:
+    """Write status to disk (local/debug) and to the shared DB (Cloud + Actions)."""
     STATUS_PATH.parent.mkdir(parents=True, exist_ok=True)
-    STATUS_PATH.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+    text = json.dumps(payload, indent=2)
+    STATUS_PATH.write_text(text, encoding="utf-8")
+    try:
+        init_db(cfg)
+        finished = str(payload.get("finished_at") or "")
+        ok = 1 if payload.get("ok") else 0
+        with connect(cfg) as conn:
+            conn.execute(
+                """
+                INSERT INTO hub_refresh_status (id, payload_json, finished_at, ok)
+                VALUES (1, ?, ?, ?)
+                ON CONFLICT(id) DO UPDATE SET
+                    payload_json = excluded.payload_json,
+                    finished_at = excluded.finished_at,
+                    ok = excluded.ok
+                """,
+                (text, finished, ok),
+            )
+    except Exception as exc:
+        _log(f"WARN could not persist refresh status to database: {exc}", None)
     return STATUS_PATH
 
 
@@ -157,5 +193,5 @@ def run_hub_refresh(
         "project_ids": ids,
         "steps": steps,
     }
-    save_refresh_status(payload)
+    save_refresh_status(payload, cfg=cfg)
     return payload

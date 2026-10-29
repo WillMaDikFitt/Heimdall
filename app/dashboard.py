@@ -20,7 +20,7 @@ from app.theme import normalize_theme_id
 from src.calibration.qc import iqr_inlier_mask, window_metrics
 from src.config import load_config, save_hub_settings, save_station_location
 from src.hub import product_name, product_tagline, projects as hub_projects, resolve_project_id
-from src.hub_refresh import load_refresh_status, run_hub_refresh
+from src.hub_refresh import load_refresh_status
 from src.telemetry.domains import DOMAIN_CHANNELS, domain_labels, project_domains
 from src.telemetry.store import (
     load_telemetry,
@@ -54,41 +54,55 @@ RANGE_HOURS = {
     "All data": None,
 }
 
+# name, short description, role, public API / docs URL
 SOURCE_DETAILS = {
     "ecmwf": (
-        "ECMWF",
-        "Helps predict the next few days",
+        "ECMWF (via Open-Meteo)",
+        "European centre model for the next few days",
         "Future weather",
+        "https://api.open-meteo.com/v1/forecast (model=ecmwf_ifs025)",
     ),
     "gfs": (
-        "NOAA GFS",
-        "Helps predict the next few days",
+        "NOAA GFS (via Open-Meteo)",
+        "US global model for the next few days",
         "Future weather",
+        "https://api.open-meteo.com/v1/forecast (model=gfs_seamless)",
     ),
     "met_norway": (
         "MET Norway",
-        "Helps predict the next few days",
+        "Nordic weather service location forecast",
         "Future weather",
+        "https://api.met.no/weatherapi/locationforecast/2.0/",
     ),
     "Open-Meteo": (
-        "Open-Meteo",
-        "Past weather used for checking",
+        "Open-Meteo archive",
+        "Hourly past weather used to check models",
         "Past weather",
+        "https://archive-api.open-meteo.com/v1/archive",
     ),
     "NASA POWER": (
         "NASA POWER",
-        "Another record of past weather",
+        "Satellite/reanalysis past weather at the pin",
         "Past weather",
+        "https://power.larc.nasa.gov/api/temporal/hourly/point",
     ),
     "IMD grid": (
         "India Meteorological Department",
-        "Official rainfall record for India",
+        "Official India rainfall grid (daily)",
         "Past rain",
+        "https://imdpune.gov.in/cmpg/Griddata/rainfall.php",
     ),
     "Calibrated station": (
         "Local weather station",
         "Readings taken at the project pin",
         "On site",
+        "Heimdall station / telemetry store",
+    ),
+    "Open-Meteo forecast": (
+        "Open-Meteo operational forecast",
+        "Fallback week outlook when ensemble is empty",
+        "Future weather",
+        "https://api.open-meteo.com/v1/forecast",
     ),
 }
 
@@ -182,6 +196,19 @@ def _load_nwp_members(project_id: str) -> pd.DataFrame:
     return load_nwp_members(cfg=cfg, station_id=station_id)
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def _load_sources_frames(project_id: str) -> dict[str, pd.DataFrame]:
+    """Extra tables only needed on the Sources tab."""
+    cfg = load_config()
+    pid = resolve_project_id(cfg, project_id)
+    station_id = str(_projects(cfg)[pid]["station"]["id"])
+    return {
+        "nwp_members": load_nwp_members(cfg=cfg, station_id=station_id),
+        "power": load_power_readings(cfg=cfg),
+        "imd": load_imd_daily_rain(cfg=cfg),
+    }
+
+
 def _label(cfg: dict, channel: str) -> str:
     meta = cfg["channels"][channel]
     return f"{meta.get('label', channel)} ({meta['unit']})"
@@ -236,16 +263,28 @@ def _source_card(
     role: str,
     status: str,
     active: bool = True,
+    api: str = "",
 ) -> str:
     state_class = "source-ok" if active else "source-idle"
+    api_html = (
+        f'<div class="source-api">{html.escape(api)}</div>' if api.strip() else ""
+    )
     return (
         f'<div class="source-card">'
         f'<div class="source-card-top"><span class="source-role">{html.escape(role)}</span>'
         f'<span class="source-state {state_class}">{html.escape(status)}</span></div>'
         f'<div class="source-name">{html.escape(name)}</div>'
         f'<div class="source-copy">{html.escape(description)}</div>'
+        f"{api_html}"
         "</div>"
     )
+
+
+def _source_tuple(key: str) -> tuple[str, str, str, str]:
+    raw = SOURCE_DETAILS[key]
+    if len(raw) >= 4:
+        return raw[0], raw[1], raw[2], raw[3]
+    return raw[0], raw[1], raw[2], ""
 
 
 def _data_sources_panel(
@@ -253,39 +292,62 @@ def _data_sources_panel(
     reference: pd.DataFrame,
     power: pd.DataFrame,
     imd: pd.DataFrame,
+    *,
+    station_live: bool = False,
 ) -> None:
-    """Show non-technical users where forecasts and checks come from."""
+    """Show every reference / forecast API Heimdall uses."""
     cards: list[str] = []
     available_members = (
         set(nwp_members["member"].dropna().astype(str)) if not nwp_members.empty else set()
     )
     for member in ("ecmwf", "gfs", "met_norway"):
-        name, description, role = SOURCE_DETAILS[member]
+        name, description, role, api = _source_tuple(member)
         active = member in available_members
         cards.append(
             _source_card(
                 name,
                 description,
                 role,
-                "Available" if active else "Not available",
+                "In latest ensemble" if active else "Not in latest pull",
                 active,
+                api,
             )
         )
 
+    name, description, role, api = _source_tuple("Open-Meteo forecast")
+    cards.append(
+        _source_card(name, description, role, "Fallback outlook", True, api)
+    )
+
     supporting = [
-        ("Open-Meteo", not reference.empty, f"{len(reference):,} hours"),
-        ("NASA POWER", not power.empty, f"{len(power):,} hours"),
-        ("IMD grid", not imd.empty, f"{len(imd):,} days"),
+        ("Open-Meteo", not reference.empty, f"{len(reference):,} hours stored"),
+        ("NASA POWER", not power.empty, f"{len(power):,} hours stored"),
+        ("IMD grid", not imd.empty, f"{len(imd):,} days stored"),
+        (
+            "Calibrated station",
+            station_live,
+            "Live on site" if station_live else "Waiting for station",
+        ),
     ]
     for key, active, status in supporting:
-        name, description, role = SOURCE_DETAILS[key]
+        name, description, role, api = _source_tuple(key)
         cards.append(
-            _source_card(name, description, role, status if active else "No data yet", active)
+            _source_card(
+                name,
+                description,
+                role,
+                status if active else "No data yet",
+                active,
+                api,
+            )
         )
 
-    _page_intro("Sources", "Where the weather data comes from.")
+    _page_intro(
+        "Data sources",
+        "Every public weather feed Heimdall reads. Nightly jobs refresh models in the background.",
+    )
     st.markdown(f'<div class="source-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
-    st.caption("Green means that information is available now.")
+    st.caption("Green = data present for this project. API lines are the exact endpoints used.")
 
 
 def _comparison_meaning(mae: float, channel: str) -> tuple[str, str]:
@@ -423,14 +485,19 @@ def _dataset_freshness_rows(
         )
 
     if include_analysis:
-        status = load_refresh_status()
+        status = load_refresh_status(cfg)
         ts = _as_utc_ts(status.get("finished_at"))
+        # If status file is stale but ensemble was refreshed, prefer forecast age.
+        if forecast is not None:
+            fc_ts = _as_utc_ts(forecast.fetched_at)
+            if ts is None or (fc_ts is not None and fc_ts > ts):
+                ts = fc_ts
         age_min, severity = _freshness_age(ts, now=now)
-        if status.get("finished_at") and not status.get("ok"):
+        if status.get("finished_at") and status.get("ok") is False:
             severity = "danger"
         rows.append(
             {
-                "name": "Analysis",
+                "name": "Nightly model update",
                 "relative": _format_updated_relative(age_min),
                 "absolute": _format_updated_absolute(ts, tz),
                 "severity": severity,
@@ -512,21 +579,24 @@ def _skill_prefs(cfg: dict) -> dict[str, float]:
     }
 
 
-def _format_analysis_stamp(status: dict | None = None) -> str:
+def _format_analysis_stamp(
+    status: dict | None = None,
+    *,
+    forecast_fetched_at: object | None = None,
+) -> str:
+    """Plain-language stamp for officials — nightly Actions, not a manual button."""
     status = status if status is not None else load_refresh_status()
     finished = status.get("finished_at")
-    if not finished:
-        return "No analysis run yet"
-    try:
-        when = pd.Timestamp(finished)
-        if when.tzinfo is None:
-            when = when.tz_localize("UTC")
-        local = when.tz_convert("Asia/Kolkata").strftime("%d %b %Y · %H:%M IST")
-    except Exception:
-        local = str(finished)
-    if status.get("ok"):
-        return f"Last analysis OK · {local}"
-    return f"Last analysis failed · {local}"
+    ts = _as_utc_ts(finished)
+    fc_ts = _as_utc_ts(forecast_fetched_at)
+    if ts is None or (fc_ts is not None and fc_ts > ts):
+        ts = fc_ts
+    if ts is None:
+        return "Nightly update · waiting for first run"
+    local = ts.tz_convert("Asia/Kolkata").strftime("%d %b %Y · %H:%M IST")
+    if status.get("finished_at") and status.get("ok") is False:
+        return f"Nightly update failed · {local}"
+    return f"Nightly update · {local}"
 
 
 def _active_theme_id(cfg: dict) -> str:
@@ -647,7 +717,7 @@ def _render_settings_page(cfg: dict, projects: dict[str, dict]) -> None:
             index=[0, 5, 15, 30].index(prefs["auto_refresh_minutes"]),
             format_func=lambda m: "Off" if m == 0 else f"Every {m} minutes",
             key="set_auto_refresh",
-            help="Reloads cached charts only. Full NWP analysis still needs Run analysis.",
+            help="How often charts re-query stored data. Models still refresh nightly in the background.",
         )
 
     st.markdown(
@@ -826,7 +896,7 @@ def _render_settings_page(cfg: dict, projects: dict[str, dict]) -> None:
     with left:
         save = st.button("Save settings", type="primary", width="stretch", key="save_hub_settings")
     with right:
-        st.caption("Save, then press Run analysis if you changed forecast models or days ahead.")
+        st.caption("Saved for this browser session. Forecast models still refresh every night automatically.")
 
     _st_html(
         theme.paint_streamlit_controls(theme.theme_tokens(color_theme)["accent"]),
@@ -897,8 +967,10 @@ def _section_nav(
                     type="primary" if active else "secondary",
                     width="stretch",
                 ):
-                    st.session_state[key] = name
-    # No st.rerun() — returning the new tab avoids a double full-script reload.
+                    if name != current:
+                        st.session_state[key] = name
+                        # Rerun so highlight and page content stay in sync.
+                        st.rerun()
     return str(st.session_state[key])
 
 
@@ -1313,7 +1385,7 @@ def _overview_alert_items(
     elif reference.empty:
         items.append(("warn", "No sensor history loaded yet"))
 
-    status = load_refresh_status()
+    status = load_refresh_status(cfg)
     finished = status.get("finished_at")
     if finished:
         try:
@@ -1321,14 +1393,14 @@ def _overview_alert_items(
             if when.tzinfo is None:
                 when = when.tz_localize("UTC")
             age_h = (now - when).total_seconds() / 3600.0
-            if not status.get("ok"):
-                items.append(("danger", "Last analysis failed"))
+            if status.get("ok") is False:
+                items.append(("danger", "Nightly model update failed"))
             elif age_h > 36:
-                items.append(("warn", f"Analysis {age_h:.0f} h old · Run analysis"))
+                items.append(("warn", f"Nightly update {age_h:.0f} h ago · check Actions"))
         except Exception:
             pass
-    else:
-        items.append(("warn", "No analysis yet · Run analysis"))
+    elif display_forecast is None:
+        items.append(("warn", "Waiting for first nightly model update"))
 
     rank = {"danger": 0, "warn": 1, "ok": 2}
     items.sort(key=lambda pair: rank.get(pair[0], 9))
@@ -1406,17 +1478,6 @@ def _forecast_overview(
             confidence_note=confidence_note,
         )
     )
-    if project:
-        _render_dataset_freshness(
-            _dataset_freshness_rows(
-                project=project,
-                cfg=cfg,
-                weather_readings=station_readings,
-                tz=tz,
-                forecast=bundle,
-                include_analysis=True,
-            )
-        )
     recent_72h = _recent_rain(station_readings, 72)
     humidity_now = current.get("humidity_pct")
     kind = str((project or {}).get("kind", "dam"))
@@ -1854,9 +1915,8 @@ def _render_sensors_page(
         weather_readings=weather_readings,
         tz=tz,
         forecast=forecast,
-        include_analysis=True,
+        include_analysis=False,
     )
-    _render_dataset_freshness(freshness_rows)
 
     domain = st.radio(
         "Domain",
@@ -2045,7 +2105,7 @@ def _render_progress_page(
         _page_intro("Progress", f"How well {label} forecasts matched real weather.")
         st.info(
             f"No scored rain outlooks for {label} yet. "
-            "Progress needs a Run analysis, then about 48 hours for that outlook to mature and be scored."
+            "Progress fills in after nightly updates, once each outlook is about 48 hours old and can be scored."
         )
         return
 
@@ -2389,7 +2449,7 @@ def _render_progress_page(
             "Hours checked",
         ]
         st.dataframe(table[history_cols], width="stretch", hide_index=True)
-        st.caption("New scores appear about 48 hours after each Run analysis.")
+        st.caption("New scores appear about 48 hours after each nightly model update.")
 
 
 
@@ -2448,43 +2508,11 @@ def main() -> None:
             """,
             unsafe_allow_html=True,
         )
-        b1, b2 = st.columns(2, gap="small")
-        with b1:
-            reload_ui = st.button("Reload UI", width="stretch", help="Clear cached charts only.")
-        with b2:
-            run_analysis = st.button(
-                "Run analysis",
-                width="stretch",
-                type="primary",
-                help="Fetch history, rebuild ensemble, archive, and verify.",
-            )
-        st.markdown(
-            f'<div class="side-analysis">{html.escape(_format_analysis_stamp())}</div>',
-            unsafe_allow_html=True,
-        )
-        if reload_ui:
-            load_config.cache_clear()
-            _load.clear()
-            st.rerun()
-        if run_analysis:
-            with st.spinner("Running hub analysis…"):
-                try:
-                    result = run_hub_refresh()
-                except Exception as exc:
-                    st.error(f"Analysis failed: {exc}")
-                    result = None
-            load_config.cache_clear()
-            _load.clear()
-            if result is not None:
-                if result.get("ok"):
-                    st.success("Analysis finished.")
-                else:
-                    st.error(result.get("error") or "Analysis finished with errors.")
-            st.rerun()
         st.markdown(
             '<div class="help-card"><strong>How to read Heimdall</strong>'
-            "<small>Overview: now · Sensors: live readings · Forecast: next week · "
-            "Progress: forecast skill · Run analysis refreshes models.</small></div>",
+            "<small>Overview: now · Sensors: site readings · Forecast: next week · "
+            "Progress: how rain forecasts are doing · Sources: APIs we use. "
+            "Models refresh every night in the background.</small></div>",
             unsafe_allow_html=True,
         )
 
@@ -2574,6 +2602,23 @@ def main() -> None:
             if not spread_col.dropna().empty:
                 ensemble_spread = float(spread_col.dropna().mean())
 
+    st.caption(
+        _format_analysis_stamp(
+            forecast_fetched_at=display_forecast.fetched_at if display_forecast else None
+        )
+    )
+    _render_dataset_freshness(
+        _dataset_freshness_rows(
+            project=project,
+            cfg=cfg,
+            weather_readings=readings,
+            tz=tz,
+            forecast=display_forecast,
+            include_analysis=True,
+        ),
+        title="Last updated",
+    )
+
     if readings.empty and reference.empty and display_forecast is None:
         st.info(
             "No weather information is available yet."
@@ -2581,7 +2626,7 @@ def main() -> None:
         return
 
     page = _section_nav(
-        ["Overview", "Sensors", "Forecast", "Map", "Progress", "Settings"],
+        ["Overview", "Sensors", "Forecast", "Map", "Progress", "Sources", "Settings"],
         key="hub_section",
         default="Overview",
     )
@@ -2595,7 +2640,7 @@ def main() -> None:
 
         @st.fragment(run_every=timedelta(seconds=min(60, auto_mins * 60)))
         def _auto_ui_refresh() -> None:
-            st.caption(f"Charts refresh every {auto_mins} min · Run analysis for full update")
+            st.caption(f"Charts refresh every {auto_mins} min · models update nightly")
             elapsed = _time.time() - float(st.session_state.get("_hub_ui_refresh_at", _time.time()))
             if elapsed >= auto_mins * 60:
                 st.session_state["_hub_ui_refresh_at"] = _time.time()
@@ -2607,7 +2652,7 @@ def main() -> None:
 
     if page == "Overview":
         if display_forecast is None:
-            st.error("Rain outlook unavailable. Check the network, then Run analysis or Reload UI.")
+            st.error("Rain outlook unavailable. Nightly update may still be running — check again shortly.")
             if forecast_error:
                 st.caption(forecast_error)
             _render_overview_alerts(
@@ -2620,16 +2665,6 @@ def main() -> None:
                     display_forecast=None,
                     confidence_label="Not checked yet",
                     confidence_note="Outlook unavailable",
-                )
-            )
-            _render_dataset_freshness(
-                _dataset_freshness_rows(
-                    project=project,
-                    cfg=cfg,
-                    weather_readings=readings,
-                    tz=tz,
-                    forecast=None,
-                    include_analysis=True,
                 )
             )
         else:
@@ -2652,19 +2687,8 @@ def main() -> None:
 
     if page == "Forecast":
         _page_intro("Forecast", "Plain-language week summary, then interactive charts.")
-        _render_dataset_freshness(
-            _dataset_freshness_rows(
-                project=project,
-                cfg=cfg,
-                weather_readings=readings,
-                tz=tz,
-                forecast=display_forecast,
-                include_analysis=True,
-            ),
-            title="Data freshness",
-        )
         if display_forecast is None:
-            st.info("Weekly forecast unavailable. Try Run analysis.")
+            st.info("Weekly forecast unavailable. Waiting for the next nightly model update.")
             if forecast_error:
                 st.caption(forecast_error)
         else:
@@ -2689,6 +2713,21 @@ def main() -> None:
 
     if page == "Progress":
         _render_progress_page(forecast_verification, tz, project, cfg=cfg)
+
+    if page == "Sources":
+        frames = _load_sources_frames(project_id)
+        station_live = (
+            not readings.empty
+            and "source" in readings.columns
+            and readings["source"].eq("sensor").any()
+        )
+        _data_sources_panel(
+            frames["nwp_members"],
+            reference,
+            frames["power"],
+            frames["imd"],
+            station_live=station_live,
+        )
 
     if page == "Settings":
         _render_settings_page(cfg, projects)
