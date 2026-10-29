@@ -51,12 +51,14 @@ jobs:
             exit 1
           fi
 
-      - name: Seed simulated sensors (optional / first-time)
-        if: ${{ github.event_name == 'workflow_dispatch' && inputs.reseed_sensors }}
+      # Keep demo/practice station readings current until live hardware is online.
+      - name: Refresh demo station readings
+        if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
         env:
           TURSO_DATABASE_URL: ${{ secrets.TURSO_DATABASE_URL }}
           TURSO_AUTH_TOKEN: ${{ secrets.TURSO_AUTH_TOKEN }}
         run: python scripts/run_heimdall_simulate.py
+        continue-on-error: true
 
       - name: Run hub analysis refresh
         env:

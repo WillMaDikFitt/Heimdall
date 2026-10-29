@@ -28,19 +28,11 @@ from src.telemetry.store import (
     load_telemetry_latest,
 )
 from src.ingestion.store import (
-    load_calibrated,
-    load_ensemble_forecast,
-    load_forecast_predictions,
-    load_forecast_scores,
     load_forecast_verification_scores,
+    load_hub_snapshot,
     load_imd_daily_rain,
-    load_latest_coefficients,
     load_nwp_members,
     load_power_readings,
-    load_readings,
-    load_reference,
-    load_source_validation_scores,
-    load_walkforward_scores,
 )
 from src.forecast.ensemble import ensemble_as_operational, ensemble_to_daily
 from src.reference.forecast import ForecastBundle, fetch_forecast, weather_label
@@ -141,9 +133,9 @@ def _st_html(body: str, *, allow_js: bool = False) -> None:
         st.markdown(body, unsafe_allow_html=True)
 
 
-@st.cache_data(ttl=300, show_spinner=True)
+@st.cache_data(ttl=600, show_spinner="Loading…")
 def _load(project_id: str = "indra") -> dict[str, object]:
-    """Lean hub payload — avoid unused Turso tables and extra Open-Meteo calls."""
+    """Lean hub payload — one DB session, skip Progress scores until that tab opens."""
     cfg = load_config()
     pid = resolve_project_id(cfg, project_id)
     project = _projects(cfg)[pid]
@@ -151,7 +143,8 @@ def _load(project_id: str = "indra") -> dict[str, object]:
     station_id = str(project["station"]["id"])
     empty = pd.DataFrame()
 
-    ensemble = load_ensemble_forecast(cfg=cfg, station_id=station_id)
+    snap = load_hub_snapshot(station_id, cfg=cfg, days=14)
+    ensemble = snap["ensemble"]
     forecast_bundle: ForecastBundle | None = None
     forecast_error = ""
     # Prefer stored ensemble; only hit Open-Meteo when ensemble is missing.
@@ -168,10 +161,10 @@ def _load(project_id: str = "indra") -> dict[str, object]:
     return {
         "cfg": runtime_cfg,
         "project": project,
-        "readings": load_readings(station_id, cfg=cfg, days=14),
-        "reference": load_reference(cfg=cfg, station_id=station_id, days=14),
+        "readings": snap["readings"],
+        "reference": snap["reference"],
         "calibrated": empty,
-        "coeffs": load_latest_coefficients(cfg=cfg, station_id=station_id),
+        "coeffs": snap["coeffs"],
         "scores": empty,
         "walkforward": empty,
         "predictions": empty,
@@ -181,11 +174,19 @@ def _load(project_id: str = "indra") -> dict[str, object]:
         "power": empty,
         "imd": empty,
         "source_validation": empty,
-        "forecast_verification": load_forecast_verification_scores(
-            cfg=cfg, station_id=station_id
-        ),
+        "forecast_verification": empty,
+        "refresh_status": snap.get("refresh_status") or {},
+        "telemetry_freshness": snap.get("telemetry_freshness") or {},
         "forecast_error": forecast_error,
     }
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def _load_verification(project_id: str) -> pd.DataFrame:
+    cfg = load_config()
+    pid = resolve_project_id(cfg, project_id)
+    station_id = str(_projects(cfg)[pid]["station"]["id"])
+    return load_forecast_verification_scores(cfg=cfg, station_id=station_id)
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -344,10 +345,10 @@ def _data_sources_panel(
 
     _page_intro(
         "Data sources",
-        "Every public weather feed Heimdall reads. A daily job refreshes models in the background.",
+        "Outside weather services this app reads. A computer job updates forecasts once a day.",
     )
     st.markdown(f'<div class="source-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
-    st.caption("Green = data present for this project. API lines are the exact endpoints used.")
+    st.caption("Green means we have data. The small line under each card is the web address we call.")
 
 
 def _comparison_meaning(mae: float, channel: str) -> tuple[str, str]:
@@ -445,12 +446,21 @@ def _dataset_freshness_rows(
     tz: str,
     forecast: ForecastBundle | None = None,
     include_analysis: bool = False,
+    practice_weather: bool = False,
+    telemetry_freshness: dict[str, pd.Timestamp] | None = None,
+    refresh_status: dict | None = None,
 ) -> list[dict[str, str]]:
     """Build last-updated rows for each project dataset."""
     names = domain_labels()
     domains = project_domains(project) or ["weather"]
     station_id = str(project["station"]["id"])
-    tel_fresh = load_telemetry_freshness(station_id=station_id, cfg=cfg)
+    if telemetry_freshness is None:
+        try:
+            tel_fresh = load_telemetry_freshness(station_id=station_id, cfg=cfg)
+        except Exception:
+            tel_fresh = {}
+    else:
+        tel_fresh = telemetry_freshness
     now = pd.Timestamp.now(tz="UTC")
     rows: list[dict[str, str]] = []
 
@@ -459,14 +469,19 @@ def _dataset_freshness_rows(
             ts = None
             if not weather_readings.empty and "timestamp" in weather_readings.columns:
                 ts = _as_utc_ts(pd.to_datetime(weather_readings["timestamp"], utc=True).max())
+            weather_name = "Station weather (demo)" if practice_weather else "Station weather"
         else:
             ts = tel_fresh.get(domain)
             ts = _as_utc_ts(ts) if ts is not None else None
+            weather_name = names.get(domain, domain)
         age_min, severity = _freshness_age(ts, now=now)
+        relative = _format_updated_relative(age_min)
+        if domain == "weather" and practice_weather and ts is not None:
+            relative = f"Demo sample · {relative}"
         rows.append(
             {
-                "name": names.get(domain, domain),
-                "relative": _format_updated_relative(age_min),
+                "name": weather_name if domain == "weather" else names.get(domain, domain),
+                "relative": relative,
                 "absolute": _format_updated_absolute(ts, tz),
                 "severity": severity,
             }
@@ -477,7 +492,7 @@ def _dataset_freshness_rows(
         age_min, severity = _freshness_age(ts, now=now)
         rows.append(
             {
-                "name": "Forecast",
+                "name": "Rain forecast",
                 "relative": _format_updated_relative(age_min),
                 "absolute": _format_updated_absolute(ts, tz),
                 "severity": severity,
@@ -485,15 +500,15 @@ def _dataset_freshness_rows(
         )
 
     if include_analysis:
-        try:
-            status = load_refresh_status(cfg)
-        except TypeError:
-            # Older Cloud processes may still have the no-arg signature briefly.
-            status = load_refresh_status()  # type: ignore[call-arg]
-        except Exception:
-            status = {}
+        status = refresh_status if refresh_status is not None else {}
+        if not status:
+            try:
+                status = load_refresh_status(cfg)
+            except TypeError:
+                status = load_refresh_status()  # type: ignore[call-arg]
+            except Exception:
+                status = {}
         ts = _as_utc_ts(status.get("finished_at"))
-        # If status is missing/stale but ensemble was refreshed, prefer forecast age.
         if forecast is not None:
             fc_ts = _as_utc_ts(forecast.fetched_at)
             if ts is None or (fc_ts is not None and fc_ts > ts):
@@ -503,7 +518,7 @@ def _dataset_freshness_rows(
             severity = "danger"
         rows.append(
             {
-                "name": "Daily auto-refresh",
+                "name": "Daily computer update",
                 "relative": _format_updated_relative(age_min),
                 "absolute": _format_updated_absolute(ts, tz),
                 "severity": severity,
@@ -512,7 +527,7 @@ def _dataset_freshness_rows(
     return rows
 
 
-def _render_dataset_freshness(rows: list[dict[str, str]], *, title: str = "Last updated") -> None:
+def _render_dataset_freshness(rows: list[dict[str, str]], *, title: str = "When data was last saved") -> None:
     if not rows:
         return
     cards = []
@@ -590,7 +605,7 @@ def _format_analysis_stamp(
     *,
     forecast_fetched_at: object | None = None,
 ) -> str:
-    """Stamp for when GitHub Actions last rebuilt forecasts (not a manual button)."""
+    """When the daily job last rebuilt rain forecasts."""
     if status is None:
         try:
             status = load_refresh_status()
@@ -602,11 +617,11 @@ def _format_analysis_stamp(
     if ts is None or (fc_ts is not None and fc_ts > ts):
         ts = fc_ts
     if ts is None:
-        return "Daily auto-refresh · waiting for first run"
+        return "Daily computer update · not run yet"
     local = ts.tz_convert("Asia/Kolkata").strftime("%d %b %Y · %H:%M IST")
     if status.get("finished_at") and status.get("ok") is False:
-        return f"Daily auto-refresh failed · {local}"
-    return f"Daily auto-refresh · {local} · pulls weather APIs and rebuilds rain outlook"
+        return f"Daily computer update failed · {local}"
+    return f"Daily computer update · {local} · rebuilds the rain forecast once a day"
 
 
 def _active_theme_id(cfg: dict) -> str:
@@ -619,7 +634,7 @@ def _active_theme_id(cfg: dict) -> str:
 
 def _render_settings_page(cfg: dict, projects: dict[str, dict]) -> None:
     """Hub display and forecast settings saved into config.yaml."""
-    _page_intro("Settings", "Theme, display, and outlook. Advanced options stay collapsed.")
+    _page_intro("Settings", "Colours and display options. Advanced items stay closed.")
     prefs = _ui_prefs(cfg)
     skill = _skill_prefs(cfg)
     forecast = cfg.get("forecast") or {}
@@ -1391,9 +1406,9 @@ def _overview_alert_items(
         last_sensor = pd.to_datetime(readings["timestamp"], utc=True).max()
         age_min = (now - last_sensor).total_seconds() / 60.0
         if age_min > stale_limit:
-            items.append(("warn", f"Sensors stale · {age_min / 60.0:.1f} h old"))
+            items.append(("warn", f"Station data is old · {age_min / 60.0:.1f} hours ago"))
     elif reference.empty:
-        items.append(("warn", "No sensor history loaded yet"))
+        items.append(("warn", "No weather history yet"))
 
     try:
         status = load_refresh_status(cfg)
@@ -1409,13 +1424,13 @@ def _overview_alert_items(
                 when = when.tz_localize("UTC")
             age_h = (now - when).total_seconds() / 3600.0
             if status.get("ok") is False:
-                items.append(("danger", "Daily auto-refresh failed"))
+                items.append(("danger", "Daily computer update failed"))
             elif age_h > 36:
-                items.append(("warn", f"Daily auto-refresh {age_h:.0f} h ago"))
+                items.append(("warn", f"Computer update is {age_h:.0f} hours old"))
         except Exception:
             pass
     elif display_forecast is None:
-        items.append(("warn", "Waiting for first daily auto-refresh"))
+        items.append(("warn", "Waiting for the first daily computer update"))
 
     rank = {"danger": 0, "warn": 1, "ok": 2}
     items.sort(key=lambda pair: rank.get(pair[0], 9))
@@ -1740,7 +1755,7 @@ def _render_station_map(
     pending = st.session_state.get(pending_key)
 
     area_km = float(station.get("area_radius_km") or (6 if str(project.get("kind")) == "plantation" else 12))
-    _page_intro("Map", "Station pin and forecast watch area.")
+    _page_intro("Map", "Where the station is, and the area we watch for rain.")
     st.markdown(
         '<div class="v-stats">'
         + theme.stat_card("Latitude", f"{lat:.4f}", "°N", str(station.get("site", "")), "layers")
@@ -1921,9 +1936,9 @@ def _render_sensors_page(
         and "source" in weather_readings.columns
         and not weather_readings["source"].eq("sensor").any()
     ):
-        sim_hint = " Simulated data until hardware is installed."
+        sim_hint = " These are demo numbers until a real station is installed."
 
-    _page_intro("Sensors", f"Live domains for {label}.{sim_hint}")
+    _page_intro("Sensors", f"Readings for {label}.{sim_hint}")
     freshness_rows = _dataset_freshness_rows(
         project=project,
         cfg=cfg,
@@ -2012,7 +2027,7 @@ def _render_sensors_page(
                 fig, width="stretch", config={"displaylogo": False}, key=f"tel_weather_{channel}"
             )
         st.caption(
-            f"Last updated {updated_foot}"
+            f"Saved {updated_foot}"
             + (f" · {_format_updated_absolute(wx_ts, tz)}" if wx_ts is not None else "")
         )
         return
@@ -2072,7 +2087,7 @@ def _render_sensors_page(
         )
     else:
         st.caption(
-            f"Last updated {updated_foot}"
+            f"Saved {updated_foot}"
             + (f" · {_format_updated_absolute(domain_ts, tz)}" if domain_ts is not None else "")
         )
 
@@ -2117,10 +2132,10 @@ def _render_progress_page(
 
     history = _ensemble_rain_history(forecast_verification)
     if history.empty:
-        _page_intro("Progress", f"How well {label} forecasts matched real weather.")
+        _page_intro("Progress", f"How close past rain forecasts were for {label}.")
         st.info(
-            f"No scored rain outlooks for {label} yet. "
-            "Progress fills in after the daily auto-refresh, once each outlook is about 48 hours old and can be scored."
+            f"No scored forecasts for {label} yet. "
+            "This page fills in after the daily computer update, once a forecast is about 2 days old."
         )
         return
 
@@ -2464,7 +2479,7 @@ def _render_progress_page(
             "Hours checked",
         ]
         st.dataframe(table[history_cols], width="stretch", hide_index=True)
-        st.caption("New scores appear about 48 hours after each daily auto-refresh.")
+        st.caption("New scores show about 2 days after each daily computer update.")
 
 
 
@@ -2524,10 +2539,10 @@ def main() -> None:
             unsafe_allow_html=True,
         )
         st.markdown(
-            '<div class="help-card"><strong>How to read Heimdall</strong>'
-            "<small>Overview: now · Sensors: site readings · Forecast: next week · "
-            "Progress: how rain forecasts are doing · Sources: APIs we use. "
-            "Models refresh once a day in the background.</small></div>",
+            '<div class="help-card"><strong>Quick guide</strong>'
+            "<small>Overview = today · Sensors = station readings · Forecast = next week · "
+            "Progress = how good past forecasts were · Sources = where data comes from. "
+            "Rain forecasts refresh once a day by themselves.</small></div>",
             unsafe_allow_html=True,
         )
 
@@ -2573,24 +2588,28 @@ def main() -> None:
         and not readings["source"].eq("sensor").any()
     )
     if str(project["kind"]) == "plantation" and readings.empty:
-        status = ("Waiting for station", "pill-idle")
+        status = ("No station online yet", "pill-idle")
     elif using_practice_data:
-        status = ("Simulated sensors", "pill-idle")
+        status = ("Demo data · not a live station", "pill-idle")
     elif coeffs.empty:
-        status = ("Weather not calibrated", "pill-idle")
+        status = ("Station not tuned yet", "pill-idle")
     elif alerts:
-        status = ("Sensor drift", "pill-warn")
+        status = ("Station may need a check", "pill-warn")
     else:
-        status = ("Sensors healthy", "pill-ok")
+        status = ("Station looks healthy", "pill-ok")
 
     now_local = pd.Timestamp.now(tz=tz)
     if readings.empty:
-        stamp = now_local.strftime("%d %b · %H:%M IST")
+        stamp = f"Checked {now_local.strftime('%d %b · %H:%M IST')}"
     else:
         latest_ts = pd.Timestamp(readings.iloc[-1]["timestamp"]).tz_convert(tz)
         same_day = latest_ts.date() == now_local.date()
         read_fmt = "%H:%M" if same_day else "%d %b %H:%M"
-        stamp = f"{now_local.strftime('%d %b · %H:%M IST')} · reading {latest_ts.strftime(read_fmt)}"
+        kind_word = "demo reading" if using_practice_data else "last reading"
+        stamp = (
+            f"Checked {now_local.strftime('%d %b · %H:%M IST')} · "
+            f"{kind_word} {latest_ts.strftime(read_fmt)}"
+        )
 
     _masthead(station, status, stamp, str(project["label"]))
 
@@ -2617,11 +2636,19 @@ def main() -> None:
             if not spread_col.dropna().empty:
                 ensemble_spread = float(spread_col.dropna().mean())
 
+    refresh_status = data.get("refresh_status") or {}
+    telemetry_freshness = data.get("telemetry_freshness") or {}
     st.caption(
         _format_analysis_stamp(
-            forecast_fetched_at=display_forecast.fetched_at if display_forecast else None
+            refresh_status if isinstance(refresh_status, dict) else {},
+            forecast_fetched_at=display_forecast.fetched_at if display_forecast else None,
         )
     )
+    if using_practice_data:
+        st.info(
+            "This site is still using demo station weather (practice numbers), "
+            "not a live sensor. The rain forecast above still updates from public weather models."
+        )
     _render_dataset_freshness(
         _dataset_freshness_rows(
             project=project,
@@ -2630,14 +2657,15 @@ def main() -> None:
             tz=tz,
             forecast=display_forecast,
             include_analysis=True,
+            practice_weather=using_practice_data,
+            telemetry_freshness=telemetry_freshness if isinstance(telemetry_freshness, dict) else {},
+            refresh_status=refresh_status if isinstance(refresh_status, dict) else {},
         ),
-        title="Last updated",
+        title="When data was last saved",
     )
 
     if readings.empty and reference.empty and display_forecast is None:
-        st.info(
-            "No weather information is available yet."
-        )
+        st.info("No weather data yet.")
         return
 
     page = _section_nav(
@@ -2655,7 +2683,7 @@ def main() -> None:
 
         @st.fragment(run_every=timedelta(seconds=min(60, auto_mins * 60)))
         def _auto_ui_refresh() -> None:
-            st.caption(f"Charts refresh every {auto_mins} min · models update once a day")
+            st.caption(f"Charts reload every {auto_mins} min · rain forecast updates once a day")
             elapsed = _time.time() - float(st.session_state.get("_hub_ui_refresh_at", _time.time()))
             if elapsed >= auto_mins * 60:
                 st.session_state["_hub_ui_refresh_at"] = _time.time()
@@ -2667,7 +2695,7 @@ def main() -> None:
 
     if page == "Overview":
         if display_forecast is None:
-            st.error("Rain outlook unavailable. Daily auto-refresh may still be running — check again shortly.")
+            st.error("Rain forecast is not ready yet. The daily computer update may still be running.")
             if forecast_error:
                 st.caption(forecast_error)
             _render_overview_alerts(
@@ -2701,9 +2729,9 @@ def main() -> None:
         _render_sensors_page(cfg, project, readings, forecast=display_forecast)
 
     if page == "Forecast":
-        _page_intro("Forecast", "Plain-language week summary, then interactive charts.")
+        _page_intro("Forecast", "Next week’s rain and weather in simple words, then charts.")
         if display_forecast is None:
-            st.info("Weekly forecast unavailable. Waiting for the next daily auto-refresh.")
+            st.info("Week forecast is not ready yet. Waiting for the next daily computer update.")
             if forecast_error:
                 st.caption(forecast_error)
         else:
@@ -2727,6 +2755,7 @@ def main() -> None:
         )
 
     if page == "Progress":
+        forecast_verification = _load_verification(project_id)
         _render_progress_page(forecast_verification, tz, project, cfg=cfg)
 
     if page == "Sources":

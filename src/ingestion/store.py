@@ -566,6 +566,116 @@ def insert_coefficients(rows: list[dict], cfg: dict | None = None) -> None:
         )
 
 
+def load_hub_snapshot(
+    station_id: str,
+    cfg: dict | None = None,
+    *,
+    days: int = 14,
+) -> dict[str, Any]:
+    """One Turso/SQLite session for the dashboard home path (far fewer round-trips)."""
+    init_db(cfg)
+    cfg = cfg or load_config()
+    sid = str(station_id)
+    since = (pd.Timestamp.now(tz="UTC") - pd.Timedelta(days=int(days))).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
+    empty = pd.DataFrame()
+    with connect(cfg) as conn:
+        ensemble = pd.read_sql_query(
+            "SELECT * FROM ensemble_forecast_hourly WHERE station_id = ? ORDER BY timestamp",
+            conn,
+            params=(sid,),
+        )
+        readings = pd.read_sql_query(
+            "SELECT * FROM readings WHERE station_id = ? AND timestamp >= ? ORDER BY timestamp",
+            conn,
+            params=(sid, since),
+        )
+        # Practice data can sit idle for weeks — still show the latest samples.
+        if readings.empty:
+            readings = pd.read_sql_query(
+                "SELECT * FROM readings WHERE station_id = ? ORDER BY timestamp DESC LIMIT 500",
+                conn,
+                params=(sid,),
+            )
+            if not readings.empty:
+                readings = readings.iloc[::-1].reset_index(drop=True)
+        reference = pd.read_sql_query(
+            "SELECT * FROM reference_readings WHERE station_id = ? AND timestamp >= ? "
+            "ORDER BY timestamp",
+            conn,
+            params=(sid, since),
+        )
+        coeffs = pd.read_sql_query(
+            """
+            SELECT c.*
+            FROM calibration_coefficients c
+            JOIN (
+                SELECT channel, MAX(id) AS max_id
+                FROM calibration_coefficients
+                WHERE station_id = ?
+                GROUP BY channel
+            ) latest ON c.id = latest.max_id
+            ORDER BY c.channel
+            """,
+            conn,
+            params=(sid,),
+        )
+        status_row = conn.execute(
+            "SELECT payload_json FROM hub_refresh_status WHERE id = 1"
+        ).fetchone()
+        tel_fresh = pd.read_sql_query(
+            """
+            SELECT domain, MAX(timestamp) AS last_timestamp
+            FROM telemetry
+            WHERE station_id = ?
+            GROUP BY domain
+            """,
+            conn,
+            params=(sid,),
+        )
+
+    if not ensemble.empty and "timestamp" in ensemble.columns:
+        ensemble["timestamp"] = pd.to_datetime(ensemble["timestamp"], utc=True)
+        if "fetched_at" in ensemble.columns:
+            ensemble["fetched_at"] = pd.to_datetime(ensemble["fetched_at"], utc=True)
+    if not readings.empty and "timestamp" in readings.columns:
+        readings["timestamp"] = pd.to_datetime(readings["timestamp"], utc=True)
+    if not reference.empty and "timestamp" in reference.columns:
+        reference["timestamp"] = pd.to_datetime(reference["timestamp"], utc=True)
+
+    refresh_status: dict[str, Any] = {}
+    if status_row is not None:
+        try:
+            import json
+
+            raw = status_row[0]
+            if isinstance(status_row, dict):
+                raw = status_row.get("payload_json")
+            if raw:
+                parsed = json.loads(str(raw))
+                if isinstance(parsed, dict):
+                    refresh_status = parsed
+        except Exception:
+            refresh_status = {}
+
+    tel_map: dict[str, pd.Timestamp] = {}
+    if not tel_fresh.empty:
+        for _, row in tel_fresh.iterrows():
+            ts = pd.to_datetime(row["last_timestamp"], utc=True)
+            if pd.notna(ts):
+                tel_map[str(row["domain"])] = ts
+
+    return {
+        "ensemble": ensemble if not ensemble.empty else empty,
+        "readings": readings if not readings.empty else empty,
+        "reference": reference if not reference.empty else empty,
+        "coeffs": coeffs if not coeffs.empty else empty,
+        "refresh_status": refresh_status,
+        "telemetry_freshness": tel_map,
+    }
+
+
 def load_readings(
     station_id: str | None = None,
     cfg: dict | None = None,
