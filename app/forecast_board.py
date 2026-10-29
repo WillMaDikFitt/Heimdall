@@ -307,7 +307,7 @@ def render_forecast_board_html(payload: dict[str, Any]) -> str:
     }}
     * {{ box-sizing: border-box; }}
     body {{
-      margin: 0; padding: 4px 2px 12px;
+      margin: 0; padding: 4px 2px 28px;
       background: transparent; color: var(--text);
       font-family: var(--font);
     }}

@@ -2818,7 +2818,15 @@ def main() -> None:
                 theme_id=_active_theme_id(cfg),
                 project_kind=str(project.get("kind", "dam")),
             )
-            components.html(render_forecast_board_html(payload), height=980, scrolling=False)
+            # Board is taller than the old 980px iframe (summary + KPIs + 3 chart rows),
+            # especially when the model-agreement card is present — scrolling avoids clip.
+            members = (payload.get("members") or {}).get("datasets") or []
+            board_height = 1380 if members else 1120
+            components.html(
+                render_forecast_board_html(payload),
+                height=board_height,
+                scrolling=True,
+            )
 
     if page == "Map":
         _render_station_map(
