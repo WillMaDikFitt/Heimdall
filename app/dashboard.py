@@ -906,7 +906,7 @@ def _render_settings_page(cfg: dict, projects: dict[str, dict]) -> None:
     with left:
         save = st.button("Save settings", type="primary", width="stretch", key="save_hub_settings")
     with right:
-        st.caption("Saved for this browser session. Forecast models still refresh every night automatically.")
+        st.caption("Saved for this browser session. Forecast models still refresh once a day automatically.")
 
     _st_html(
         theme.paint_streamlit_controls(theme.theme_tokens(color_theme)["accent"]),
