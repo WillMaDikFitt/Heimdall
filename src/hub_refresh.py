@@ -35,7 +35,7 @@ def _log(message: str, sink: LogFn | None) -> None:
 
 
 def load_refresh_status(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
-    """Prefer Turso/shared DB status so Streamlit Cloud sees nightly Actions runs."""
+    """Prefer Turso/shared DB status so Streamlit Cloud sees daily Actions runs."""
     try:
         init_db(cfg)
         with connect(cfg) as conn:
@@ -43,7 +43,14 @@ def load_refresh_status(cfg: dict[str, Any] | None = None) -> dict[str, Any]:
                 "SELECT payload_json FROM hub_refresh_status WHERE id = 1"
             ).fetchone()
         if row is not None:
-            raw = row[0] if not isinstance(row, dict) else row.get("payload_json")
+            # Row may be tuple, sqlite3.Row, or mapping depending on driver.
+            if isinstance(row, dict):
+                raw = row.get("payload_json")
+            else:
+                try:
+                    raw = row["payload_json"]
+                except Exception:
+                    raw = row[0]
             if raw:
                 data = json.loads(str(raw))
                 if isinstance(data, dict) and data:

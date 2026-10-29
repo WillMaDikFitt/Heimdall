@@ -344,7 +344,7 @@ def _data_sources_panel(
 
     _page_intro(
         "Data sources",
-        "Every public weather feed Heimdall reads. Nightly jobs refresh models in the background.",
+        "Every public weather feed Heimdall reads. A daily job refreshes models in the background.",
     )
     st.markdown(f'<div class="source-grid">{"".join(cards)}</div>', unsafe_allow_html=True)
     st.caption("Green = data present for this project. API lines are the exact endpoints used.")
@@ -485,9 +485,15 @@ def _dataset_freshness_rows(
         )
 
     if include_analysis:
-        status = load_refresh_status(cfg)
+        try:
+            status = load_refresh_status(cfg)
+        except TypeError:
+            # Older Cloud processes may still have the no-arg signature briefly.
+            status = load_refresh_status()  # type: ignore[call-arg]
+        except Exception:
+            status = {}
         ts = _as_utc_ts(status.get("finished_at"))
-        # If status file is stale but ensemble was refreshed, prefer forecast age.
+        # If status is missing/stale but ensemble was refreshed, prefer forecast age.
         if forecast is not None:
             fc_ts = _as_utc_ts(forecast.fetched_at)
             if ts is None or (fc_ts is not None and fc_ts > ts):
@@ -497,7 +503,7 @@ def _dataset_freshness_rows(
             severity = "danger"
         rows.append(
             {
-                "name": "Nightly model update",
+                "name": "Daily auto-refresh",
                 "relative": _format_updated_relative(age_min),
                 "absolute": _format_updated_absolute(ts, tz),
                 "severity": severity,
@@ -584,19 +590,23 @@ def _format_analysis_stamp(
     *,
     forecast_fetched_at: object | None = None,
 ) -> str:
-    """Plain-language stamp for officials — nightly Actions, not a manual button."""
-    status = status if status is not None else load_refresh_status()
+    """Stamp for when GitHub Actions last rebuilt forecasts (not a manual button)."""
+    if status is None:
+        try:
+            status = load_refresh_status()
+        except Exception:
+            status = {}
     finished = status.get("finished_at")
     ts = _as_utc_ts(finished)
     fc_ts = _as_utc_ts(forecast_fetched_at)
     if ts is None or (fc_ts is not None and fc_ts > ts):
         ts = fc_ts
     if ts is None:
-        return "Nightly update · waiting for first run"
+        return "Daily auto-refresh · waiting for first run"
     local = ts.tz_convert("Asia/Kolkata").strftime("%d %b %Y · %H:%M IST")
     if status.get("finished_at") and status.get("ok") is False:
-        return f"Nightly update failed · {local}"
-    return f"Nightly update · {local}"
+        return f"Daily auto-refresh failed · {local}"
+    return f"Daily auto-refresh · {local} · pulls weather APIs and rebuilds rain outlook"
 
 
 def _active_theme_id(cfg: dict) -> str:
@@ -717,7 +727,7 @@ def _render_settings_page(cfg: dict, projects: dict[str, dict]) -> None:
             index=[0, 5, 15, 30].index(prefs["auto_refresh_minutes"]),
             format_func=lambda m: "Off" if m == 0 else f"Every {m} minutes",
             key="set_auto_refresh",
-            help="How often charts re-query stored data. Models still refresh nightly in the background.",
+            help="How often charts re-query stored data. Models still refresh once a day in the background.",
         )
 
     st.markdown(
@@ -1385,7 +1395,12 @@ def _overview_alert_items(
     elif reference.empty:
         items.append(("warn", "No sensor history loaded yet"))
 
-    status = load_refresh_status(cfg)
+    try:
+        status = load_refresh_status(cfg)
+    except TypeError:
+        status = load_refresh_status()  # type: ignore[call-arg]
+    except Exception:
+        status = {}
     finished = status.get("finished_at")
     if finished:
         try:
@@ -1394,13 +1409,13 @@ def _overview_alert_items(
                 when = when.tz_localize("UTC")
             age_h = (now - when).total_seconds() / 3600.0
             if status.get("ok") is False:
-                items.append(("danger", "Nightly model update failed"))
+                items.append(("danger", "Daily auto-refresh failed"))
             elif age_h > 36:
-                items.append(("warn", f"Nightly update {age_h:.0f} h ago · check Actions"))
+                items.append(("warn", f"Daily auto-refresh {age_h:.0f} h ago"))
         except Exception:
             pass
     elif display_forecast is None:
-        items.append(("warn", "Waiting for first nightly model update"))
+        items.append(("warn", "Waiting for first daily auto-refresh"))
 
     rank = {"danger": 0, "warn": 1, "ok": 2}
     items.sort(key=lambda pair: rank.get(pair[0], 9))
@@ -2105,7 +2120,7 @@ def _render_progress_page(
         _page_intro("Progress", f"How well {label} forecasts matched real weather.")
         st.info(
             f"No scored rain outlooks for {label} yet. "
-            "Progress fills in after nightly updates, once each outlook is about 48 hours old and can be scored."
+            "Progress fills in after the daily auto-refresh, once each outlook is about 48 hours old and can be scored."
         )
         return
 
@@ -2449,7 +2464,7 @@ def _render_progress_page(
             "Hours checked",
         ]
         st.dataframe(table[history_cols], width="stretch", hide_index=True)
-        st.caption("New scores appear about 48 hours after each nightly model update.")
+        st.caption("New scores appear about 48 hours after each daily auto-refresh.")
 
 
 
@@ -2512,7 +2527,7 @@ def main() -> None:
             '<div class="help-card"><strong>How to read Heimdall</strong>'
             "<small>Overview: now · Sensors: site readings · Forecast: next week · "
             "Progress: how rain forecasts are doing · Sources: APIs we use. "
-            "Models refresh every night in the background.</small></div>",
+            "Models refresh once a day in the background.</small></div>",
             unsafe_allow_html=True,
         )
 
@@ -2640,7 +2655,7 @@ def main() -> None:
 
         @st.fragment(run_every=timedelta(seconds=min(60, auto_mins * 60)))
         def _auto_ui_refresh() -> None:
-            st.caption(f"Charts refresh every {auto_mins} min · models update nightly")
+            st.caption(f"Charts refresh every {auto_mins} min · models update once a day")
             elapsed = _time.time() - float(st.session_state.get("_hub_ui_refresh_at", _time.time()))
             if elapsed >= auto_mins * 60:
                 st.session_state["_hub_ui_refresh_at"] = _time.time()
@@ -2652,7 +2667,7 @@ def main() -> None:
 
     if page == "Overview":
         if display_forecast is None:
-            st.error("Rain outlook unavailable. Nightly update may still be running — check again shortly.")
+            st.error("Rain outlook unavailable. Daily auto-refresh may still be running — check again shortly.")
             if forecast_error:
                 st.caption(forecast_error)
             _render_overview_alerts(
@@ -2688,7 +2703,7 @@ def main() -> None:
     if page == "Forecast":
         _page_intro("Forecast", "Plain-language week summary, then interactive charts.")
         if display_forecast is None:
-            st.info("Weekly forecast unavailable. Waiting for the next nightly model update.")
+            st.info("Weekly forecast unavailable. Waiting for the next daily auto-refresh.")
             if forecast_error:
                 st.caption(forecast_error)
         else:
