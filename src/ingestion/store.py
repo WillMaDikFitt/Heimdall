@@ -8,7 +8,7 @@ from typing import Any
 import pandas as pd
 
 from src.config import load_config
-from src.db import connect, db_path
+from src.db import connect, db_path, using_remote_db
 from src.schema import CHANNEL_NAMES, SensorPayload
 
 READINGS_COLUMNS = [
@@ -45,6 +45,28 @@ def init_db(cfg: dict | None = None, *, force: bool = False) -> None:
     if _SCHEMA_READY and not force:
         return
     with connect(cfg) as conn:
+        # Turso: each PRAGMA/ALTER is a slow HTTP round-trip. Production DB is already
+        # migrated by Actions — only ensure core tables exist, then skip heavy migrate.
+        if using_remote_db() and not force:
+            try:
+                row = conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' AND name='readings' LIMIT 1"
+                ).fetchone()
+            except Exception:
+                row = None
+            if row is not None:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS hub_refresh_status (
+                        id INTEGER PRIMARY KEY CHECK (id = 1),
+                        payload_json TEXT NOT NULL,
+                        finished_at TEXT,
+                        ok INTEGER
+                    )
+                    """
+                )
+                _SCHEMA_READY = True
+                return
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS readings (
@@ -581,35 +603,53 @@ def load_hub_snapshot(
         "%Y-%m-%dT%H:%M:%SZ"
     )
     empty = pd.DataFrame()
+    # Lean column lists — less Turso payload on Cloud.
+    ens_cols = (
+        "timestamp, station_id, temperature_c, humidity_pct, pressure_hpa, rainfall_mm, "
+        "wind_speed_ms, wind_direction_deg, temperature_c_spread, rainfall_mm_spread, "
+        "source, fetched_at, bias_corrected"
+    )
+    read_cols = (
+        "timestamp, station_id, temperature_c, humidity_pct, pressure_hpa, rainfall_mm, "
+        "wind_speed_ms, wind_direction_deg, source"
+    )
+    ref_cols = (
+        "timestamp, station_id, temperature_c, humidity_pct, pressure_hpa, rainfall_mm, "
+        "wind_speed_ms, wind_direction_deg"
+    )
     with connect(cfg) as conn:
         ensemble = pd.read_sql_query(
-            "SELECT * FROM ensemble_forecast_hourly WHERE station_id = ? ORDER BY timestamp",
+            f"SELECT {ens_cols} FROM ensemble_forecast_hourly WHERE station_id = ? "
+            "ORDER BY timestamp",
             conn,
             params=(sid,),
         )
         readings = pd.read_sql_query(
-            "SELECT * FROM readings WHERE station_id = ? AND timestamp >= ? ORDER BY timestamp",
+            f"SELECT {read_cols} FROM readings WHERE station_id = ? AND timestamp >= ? "
+            "ORDER BY timestamp",
             conn,
             params=(sid, since),
         )
         # Practice data can sit idle for weeks — still show the latest samples.
         if readings.empty:
             readings = pd.read_sql_query(
-                "SELECT * FROM readings WHERE station_id = ? ORDER BY timestamp DESC LIMIT 500",
+                f"SELECT {read_cols} FROM readings WHERE station_id = ? "
+                "ORDER BY timestamp DESC LIMIT 500",
                 conn,
                 params=(sid,),
             )
             if not readings.empty:
                 readings = readings.iloc[::-1].reset_index(drop=True)
         reference = pd.read_sql_query(
-            "SELECT * FROM reference_readings WHERE station_id = ? AND timestamp >= ? "
-            "ORDER BY timestamp",
+            f"SELECT {ref_cols} FROM reference_readings WHERE station_id = ? "
+            "AND timestamp >= ? ORDER BY timestamp",
             conn,
             params=(sid, since),
         )
         coeffs = pd.read_sql_query(
             """
-            SELECT c.*
+            SELECT c.station_id, c.channel, c.scale, c.offset, c.fitted_at, c.bias,
+                   c.mae, c.rmse
             FROM calibration_coefficients c
             JOIN (
                 SELECT channel, MAX(id) AS max_id

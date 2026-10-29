@@ -169,7 +169,7 @@ def _hub_snapshot_fallback(station_id: str, cfg: dict, *, days: int = 14) -> dic
     }
 
 
-@st.cache_data(ttl=600, show_spinner=True)
+@st.cache_data(ttl=900, show_spinner=False)
 def _load(project_id: str = "indra") -> dict[str, object]:
     """Lean hub payload — one DB session when available; skip Progress scores until needed."""
     cfg = load_config()
@@ -179,22 +179,62 @@ def _load(project_id: str = "indra") -> dict[str, object]:
     station_id = str(project["station"]["id"])
     empty = pd.DataFrame()
 
-    if callable(_load_hub_snapshot):
-        snap = _load_hub_snapshot(station_id, cfg=cfg, days=14)
-    else:
-        snap = _hub_snapshot_fallback(station_id, cfg, days=14)
+    try:
+        if callable(_load_hub_snapshot):
+            snap = _load_hub_snapshot(station_id, cfg=cfg, days=14)
+        else:
+            snap = _hub_snapshot_fallback(station_id, cfg, days=14)
+    except Exception as exc:
+        # Never hang the whole app on a bad Turso round-trip.
+        snap = {
+            "ensemble": empty,
+            "readings": empty,
+            "reference": empty,
+            "coeffs": empty,
+            "refresh_status": {},
+            "telemetry_freshness": {},
+        }
+        forecast_bundle = None
+        forecast_error = f"Could not load saved weather ({exc})"
+        return {
+            "cfg": runtime_cfg,
+            "project": project,
+            "readings": empty,
+            "reference": empty,
+            "calibrated": empty,
+            "coeffs": empty,
+            "scores": empty,
+            "walkforward": empty,
+            "predictions": empty,
+            "operational_forecast": forecast_bundle,
+            "ensemble": empty,
+            "nwp_members": empty,
+            "power": empty,
+            "imd": empty,
+            "source_validation": empty,
+            "forecast_verification": empty,
+            "refresh_status": {},
+            "telemetry_freshness": {},
+            "forecast_error": forecast_error,
+        }
 
     ensemble = snap["ensemble"]
     forecast_bundle: ForecastBundle | None = None
     forecast_error = ""
-    # Prefer stored ensemble; only hit Open-Meteo when ensemble is missing.
+    # Prefer stored ensemble; avoid live Open-Meteo on Cloud open (can hang).
+    # Fallback only when ensemble is empty AND we are not on a remote DB.
     if isinstance(ensemble, pd.DataFrame) and ensemble.empty:
         try:
-            forecast_bundle = fetch_forecast(
-                cfg=runtime_cfg,
-                forecast_days=int(cfg["forecast"].get("operational_days", 7)),
-                cache_minutes=int(cfg["forecast"].get("cache_minutes", 30)),
-            )
+            from src.db import using_remote_db
+
+            if not using_remote_db():
+                forecast_bundle = fetch_forecast(
+                    cfg=runtime_cfg,
+                    forecast_days=int(cfg["forecast"].get("operational_days", 7)),
+                    cache_minutes=int(cfg["forecast"].get("cache_minutes", 30)),
+                )
+            else:
+                forecast_error = "No saved forecast yet — waiting for the daily computer update."
         except Exception as exc:
             forecast_error = str(exc)
 
@@ -1016,27 +1056,28 @@ def _section_nav(
     key: str = "hub_section",
     default: str = "Overview",
 ) -> str:
-    """Custom underline tab bar — replaces Streamlit segmented_control."""
-    if key not in st.session_state or st.session_state[key] not in options:
-        st.session_state[key] = default if default in options else options[0]
-
-    current = str(st.session_state[key])
+    """Single-widget section picker — one rerun per click (no button grid + st.rerun)."""
+    start = default if default in options else options[0]
     with st.container(key="hub_nav"):
-        cols = st.columns(len(options), gap="small")
-        for col, name in zip(cols, options):
-            with col:
-                active = name == current
-                if st.button(
-                    name,
-                    key=f"{key}_btn_{name}",
-                    type="primary" if active else "secondary",
-                    width="stretch",
-                ):
-                    if name != current:
-                        st.session_state[key] = name
-                        # Rerun so highlight and page content stay in sync.
-                        st.rerun()
-    return str(st.session_state[key])
+        control = getattr(st, "segmented_control", None)
+        if callable(control):
+            choice = control(
+                "Section",
+                options,
+                default=start,
+                key=key,
+                label_visibility="collapsed",
+            )
+            return str(choice or start)
+        choice = st.radio(
+            "Section",
+            options,
+            index=0,
+            horizontal=True,
+            key=key,
+            label_visibility="collapsed",
+        )
+        return str(choice or start)
 
 
 def _friendly_model_name(name: str) -> str:
@@ -2528,14 +2569,17 @@ def main() -> None:
     projects = _projects(base_cfg)
     boot_theme = _active_theme_id(base_cfg)
     st.markdown(theme.stylesheet(boot_theme), unsafe_allow_html=True)
-    _accent = theme.theme_tokens(boot_theme)["accent"]
-    _st_html(theme.paint_streamlit_controls(_accent), allow_js=True)
-    try:
-        from src.config import _sync_streamlit_primary
+    # Heavy JS accent paint once per session — every-page injection made Cloud feel stuck.
+    if not st.session_state.get("_accent_js_done"):
+        _accent = theme.theme_tokens(boot_theme)["accent"]
+        _st_html(theme.paint_streamlit_controls(_accent), allow_js=True)
+        st.session_state["_accent_js_done"] = True
+        try:
+            from src.config import _sync_streamlit_primary
 
-        _sync_streamlit_primary(_accent)
-    except Exception:
-        pass
+            _sync_streamlit_primary(_accent)
+        except Exception:
+            pass
 
     with st.sidebar:
         st.markdown(
@@ -2586,7 +2630,8 @@ def main() -> None:
             unsafe_allow_html=True,
         )
 
-    data = _load(project_id)
+    with st.spinner("Loading weather…"):
+        data = _load(project_id)
     cfg: dict = data["cfg"]  # type: ignore[assignment]
     project = data["project"]  # type: ignore[assignment]
     readings_all: pd.DataFrame = data["readings"]  # type: ignore[assignment]
@@ -2653,6 +2698,12 @@ def main() -> None:
 
     _masthead(station, status, stamp, str(project["label"]))
 
+    page = _section_nav(
+        ["Overview", "Sensors", "Forecast", "Map", "Progress", "Sources", "Settings"],
+        key="hub_section",
+        default="Overview",
+    )
+
     display_forecast = operational
     ensemble_spread: float | None = None
     if not ensemble.empty:
@@ -2678,60 +2729,42 @@ def main() -> None:
 
     refresh_status = data.get("refresh_status") or {}
     telemetry_freshness = data.get("telemetry_freshness") or {}
-    st.caption(
-        _format_analysis_stamp(
-            refresh_status if isinstance(refresh_status, dict) else {},
-            forecast_fetched_at=display_forecast.fetched_at if display_forecast else None,
+
+    # Freshness strip only on Overview — keeps other tabs snappy.
+    if page == "Overview":
+        st.caption(
+            _format_analysis_stamp(
+                refresh_status if isinstance(refresh_status, dict) else {},
+                forecast_fetched_at=display_forecast.fetched_at if display_forecast else None,
+            )
         )
-    )
-    if using_practice_data:
-        st.info(
-            "This site is still using demo station weather (practice numbers), "
-            "not a live sensor. The rain forecast above still updates from public weather models."
+        if using_practice_data:
+            st.info(
+                "This site is still using demo station weather (practice numbers), "
+                "not a live sensor. The rain forecast still updates from public weather models."
+            )
+        _render_dataset_freshness(
+            _dataset_freshness_rows(
+                project=project,
+                cfg=cfg,
+                weather_readings=readings,
+                tz=tz,
+                forecast=display_forecast,
+                include_analysis=True,
+                practice_weather=using_practice_data,
+                telemetry_freshness=telemetry_freshness
+                if isinstance(telemetry_freshness, dict)
+                else {},
+                refresh_status=refresh_status if isinstance(refresh_status, dict) else {},
+            ),
+            title="When data was last saved",
         )
-    _render_dataset_freshness(
-        _dataset_freshness_rows(
-            project=project,
-            cfg=cfg,
-            weather_readings=readings,
-            tz=tz,
-            forecast=display_forecast,
-            include_analysis=True,
-            practice_weather=using_practice_data,
-            telemetry_freshness=telemetry_freshness if isinstance(telemetry_freshness, dict) else {},
-            refresh_status=refresh_status if isinstance(refresh_status, dict) else {},
-        ),
-        title="When data was last saved",
-    )
 
     if readings.empty and reference.empty and display_forecast is None:
         st.info("No weather data yet.")
+        if forecast_error:
+            st.caption(forecast_error)
         return
-
-    page = _section_nav(
-        ["Overview", "Sensors", "Forecast", "Map", "Progress", "Sources", "Settings"],
-        key="hub_section",
-        default="Overview",
-    )
-
-    auto_mins = int(prefs.get("auto_refresh_minutes") or 0)
-    if auto_mins > 0:
-        import time as _time
-
-        if "_hub_ui_refresh_at" not in st.session_state:
-            st.session_state["_hub_ui_refresh_at"] = _time.time()
-
-        @st.fragment(run_every=timedelta(seconds=min(60, auto_mins * 60)))
-        def _auto_ui_refresh() -> None:
-            st.caption(f"Charts reload every {auto_mins} min · rain forecast updates once a day")
-            elapsed = _time.time() - float(st.session_state.get("_hub_ui_refresh_at", _time.time()))
-            if elapsed >= auto_mins * 60:
-                st.session_state["_hub_ui_refresh_at"] = _time.time()
-                load_config.cache_clear()
-                _load.clear()
-                st.rerun()
-
-        _auto_ui_refresh()
 
     if page == "Overview":
         if display_forecast is None:
